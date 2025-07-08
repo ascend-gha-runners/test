@@ -1,0 +1,32 @@
+name: test npu
+on:
+  workflow_dispatch:
+
+jobs:
+  test1:
+    runs-on: linux-arm64-npu-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: npu info
+        run: |
+          npu-smi info
+          ls /dev
+  test2:
+    runs-on: linux-arm64-npu-2
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: npu info
+        run: |
+          npu-smi info
+          ls /dev
+  test4:
+    runs-on: linux-arm64-npu-4
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: npu info
+        run: |
+          npu-smi info
+          ls /dev
