@@ -1,0 +1,12 @@
+name: Test Action Path in Container
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: linux-arm64-npu-1-test
+    container:
+      image: ubuntu:22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/test-action-path

@@ -1,0 +1,21 @@
+name: Test Action Path
+description: Test github.action_path vs GITHUB_ACTION_PATH in container
+runs:
+  using: composite
+  steps:
+    - name: Print and compare paths
+      shell: bash
+      run: |
+        echo "=== github.action_path (expression) ==="
+        echo "${{ github.action_path }}"
+        echo "=== GITHUB_ACTION_PATH (env var) ==="
+        echo "$GITHUB_ACTION_PATH"
+        echo "=== Path comparison ==="
+        if [ "${{ github.action_path }}" = "$GITHUB_ACTION_PATH" ]; then
+          echo "MATCH: both paths are the same"
+        else
+          echo "MISMATCH: expression path differs from env var path"
+        fi
+        echo "=== Directory existence check ==="
+        ls -la "${{ github.action_path }}" 2>&1 || echo "FAIL: github.action_path directory not accessible"
+        ls -la "$GITHUB_ACTION_PATH" 2>&1 || echo "FAIL: GITHUB_ACTION_PATH directory not accessible"
