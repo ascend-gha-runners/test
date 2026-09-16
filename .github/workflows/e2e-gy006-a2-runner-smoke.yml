@@ -1,0 +1,73 @@
+name: e2e-gy006-a2-runner-smoke
+# 贵阳006 组织级 A2 整卡 runner（linux-aarch64-a2-{1,2,4,8}）端到端冒烟
+# 覆盖：label 调度 / aarch64 / NPU 卡数 / CPU+内存配额 / git-cdn / 共享缓存挂载
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ["linux-aarch64-a2-${{ matrix.n }}", "gy-006"]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 4, 8]
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 环境与架构
+        run: |
+          echo "runner: $(hostname)"
+          uname -m | grep -qx aarch64 || { echo "FAIL: 架构不是 aarch64"; exit 1; }
+          echo "PASS: aarch64"
+
+      - name: NPU 卡数 = ${{ matrix.n }}
+        run: |
+          npu-smi info
+          got=$(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)
+          echo "davinci devices: $got, expect ${{ matrix.n }}"
+          [ "$got" -eq "${{ matrix.n }}" ] || { echo "FAIL: NPU 卡数不符"; exit 1; }
+          echo "PASS: NPU 卡数 = ${{ matrix.n }}"
+
+      - name: CPU/内存配额（cgroup）
+        run: |
+          CG=/sys/fs/cgroup
+          if [ -f "$CG/cpu.max" ]; then
+            read q p < "$CG/cpu.max"
+            [ "$q" = "max" ] && cores="" || cores=$((q / p))
+            mem=$(cat "$CG/memory.max" 2>/dev/null)
+          else
+            cq=$(cat "$CG/cpu/cpu.cfs_quota_us"); cp=$(cat "$CG/cpu/cpu.cfs_period_us")
+            [ "$cq" -lt 0 ] && cores="" || cores=$((cq / cp))
+            mem=$(cat "$CG/memory/memory.limit_in_bytes" 2>/dev/null)
+          fi
+          expect=${{ matrix.n }}; exp_cores=$((23 * expect)); exp_mem=$((64 * 1024 * 1024 * 1024 * expect))
+          echo "cpu cores=$cores (expect $exp_cores), memory.max=$mem"
+          if [ -z "$cores" ]; then
+            echo "WARN: 未读到 CPU 限制，跳过断言"
+          elif [ "$cores" -lt $((exp_cores * 9 / 10)) ]; then
+            echo "FAIL: CPU 配额不足"; exit 1
+          else
+            echo "PASS: CPU 配额 ≥ 90% 期望值"
+          fi
+          if [ -n "$mem" ] && [ "$mem" != "max" ]; then
+            [ "$mem" -ge $((exp_mem * 9 / 10)) ] || { echo "FAIL: 内存配额不足"; exit 1; }
+            echo "PASS: 内存配额 ≥ 90% 期望值"
+          else
+            echo "WARN: 未读到内存限制，跳过断言"
+          fi
+
+      - name: git-cdn 代理
+        run: |
+          git config --get-regexp insteadof || true
+          git clone --depth 1 https://github.com/ascend-gha-runners/test /tmp/t \
+            || { echo "FAIL: git clone 失败"; exit 1; }
+          ls /tmp/t/.github/workflows
+          echo "PASS: git-cdn clone 成功"
+
+      - name: 共享缓存挂载（/root/.cache）
+        run: |
+          [ -d /root/.cache ] || { echo "FAIL: /root/.cache 未挂载"; exit 1; }
+          touch /root/.cache/.e2e-write-test && rm /root/.cache/.e2e-write-test
+          df -h /root/.cache
+          echo "PASS: 共享缓存可写"
