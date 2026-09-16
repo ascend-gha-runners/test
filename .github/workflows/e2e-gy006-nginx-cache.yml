@@ -34,17 +34,37 @@ jobs:
           python -c "import six; print('six', six.__version__)"
           echo "PASS: 经缓存安装成功"
 
-      - name: 404 回源（huaweicloud 未同步的新包走 fallback）
+      - name: 404 回源确定性断言（直连 huaweicloud 404 + 缓存 200）
         run: |
-          # 取 PyPI 上最新发布的包名在huaweicloud镜像大概率未同步，
-          # 经缓存安装成功即证明回源链路（USTC→NJU→official）生效。
-          pkg=$(curl -s https://pypi.org/simple/ 2>/dev/null | grep -oE '>[a-z0-9._-]+<' | tail -200 | shuf -n1 | tr -d '><')
-          [ -n "$pkg" ] || pkg=delegator-py
-          echo "probe package: $pkg"
-          timeout 300 pip download --no-deps --index-url "$INDEX" --trusted-host \
-            cache-service.nginx-pypi-cache.svc.cluster.local -d /tmp/fb "$pkg" \
-            && echo "PASS: $pkg 经缓存获取成功（含回源）" \
-            || echo "WARN: $pkg 获取失败（新包可能已被镜像同步/已下架），跳过"
+          # 从 PyPI 官方 RSS 取最近发布的包（huaweicloud 镜像有同步窗口，
+          # 大概率未同步），逐个找"直连 huaweicloud 404"的样本，再经缓存
+          # 请求同一路径断言 200 —— 回源铁证，不靠赌。
+          cands=$(curl -s --max-time 20 https://pypi.org/rss/updates.xml \
+            | grep -oE '<title>[^<]+</title>' | sed -E 's#</?title>##g; s# .*##' | head -50)
+          [ -n "$cands" ] || cands="six charset-normalizer packaging wheel"
+          hit=""
+          for pkg in $cands; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+              "https://repo.huaweicloud.com/repository/pypi/simple/$pkg/")
+            echo "  direct-huaweicloud $pkg -> $code"
+            [ "$code" = "404" ] && { hit=$pkg; break; }
+          done
+          if [ -z "$hit" ]; then
+            echo "WARN: 候选包均已被 huaweicloud 同步，本轮无法构造确定性 404 场景（不判定失败）"
+            exit 0
+          fi
+          echo "probe package: $hit"
+          ccode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$INDEX/$hit/")
+          echo "via-cache: $ccode"
+          [ "$ccode" = "200" ] || { echo "FAIL: 缓存未回源 (got $ccode)"; exit 1; }
+          served=$(curl -sI --max-time 30 "$INDEX/$hit/" | grep -i x-served-by | tr -d '\r' | awk '{print $2}')
+          echo "X-Served-By: ${served:-<absent>}"
+          if [ -n "$served" ]; then
+            echo "$served" | grep -qE "pypi-org|ustc|nju" || { echo "FAIL: X-Served-By=$served 非回源层级"; exit 1; }
+            echo "PASS: 确定性回源成立，由 $served 服务"
+          else
+            echo "WARN: X-Served-By 未上线（ascend-ci-deployment#1672 未部署），已凭 直连404+缓存200 判定"
+          fi
 
       - name: 大 wheel 冷/热耗时对比（信息项）
         run: |
