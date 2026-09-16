@@ -34,7 +34,7 @@ jobs:
           python -c "import six; print('six', six.__version__)"
           echo "PASS: 经缓存安装成功"
 
-      - name: 404 回源确定性断言（X-Served-By / 直连404+缓存200）
+      - name: 404 回源确定性断言（X-Cache-Tier / 直连404+缓存200）
         run: |
           bogus="e2e-nonexistent-pkg-${GITHUB_RUN_ID}"
           dcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
@@ -43,18 +43,18 @@ jobs:
           [ "$dcode" = "404" ] || { echo "FAIL: 直接 huaweicloud 未返回 404"; exit 1; }
 
           vcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$INDEX/$bogus/")
-          served=$(curl -sI --max-time 30 "$INDEX/$bogus/" | grep -i x-served-by | tr -d '\r' | awk '{print $2}')
-          echo "via-cache: $vcode, X-Served-By: ${served:-<absent>}"
+          served=$(curl -sI --max-time 30 "$INDEX/$bogus/" | grep -i x-cache-tier | tr -d '\r' | awk '{print $2}')
+          echo "via-cache: $vcode, X-Cache-Tier: ${served:-<absent>}"
 
           if [ -n "$served" ]; then
-            # X-Served-By 带 always：即便最终 404，也证明请求走过 primary→fallback
+            # X-Cache-Tier 带 always：即便最终 404，也证明请求走过 primary→fallback
             echo "$served" | grep -qE "pypi-org|ustc|nju" \
               && { echo "PASS: 回退链确定性成立（最终 $vcode，由 $served 服务）"; exit 0; } \
-              || { echo "FAIL: X-Served-By=$served 不是回源层级"; exit 1; }
+              || { echo "FAIL: X-Cache-Tier=$served 不是回源层级"; exit 1; }
           fi
 
-          # X-Served-By 未部署（ascend-ci-deployment#1672）：退回真实包探测
-          echo "INFO: X-Served-By 未上线，尝试真实包回源探测"
+          # X-Cache-Tier 未部署（ascend-ci-deployment#1672）：退回真实包探测
+          echo "INFO: X-Cache-Tier 未上线，尝试真实包回源探测"
           cands=$(curl -s --max-time 20 https://pypi.org/rss/updates.xml \
             | grep -oE '<title>[^<]+</title>' | sed -E 's#</?title>##g; s# .*##' | head -50)
           hit=""
