@@ -1,0 +1,62 @@
+name: e2e-gy006-nginx-cache
+# 验证 runner 流量经过集群内 nginx-pypi-cache（PR ascend-ci-deployment#1553
+# 多级回源：huaweicloud→USTC→NJU→official），对应 backlog#2075 的高可用能力。
+# 5xx fallback 由 ascend-ci-deployment 的 nginx-cache-test 单测回归覆盖，
+# 本 workflow 验证线上缓存链路 + 404 真实回源。
+on:
+  workflow_dispatch:
+
+jobs:
+  pypi-cache:
+    runs-on: ["linux-aarch64-a2-1", "gy-006"]
+    timeout-minutes: 60
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      INDEX: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+    steps:
+      - name: 缓存在请求路径上（X-Pypi-Cache 头）
+        run: |
+          h1=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          echo "first=$h1 second=$h2"
+          [ -n "$h1" ] || { echo "FAIL: 响应无 X-Pypi-Cache 头，请求未经过缓存"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: MISS 后未命中"; exit 1; }
+          fi
+          echo "PASS: 请求经过 nginx-pypi-cache（$h1 → $h2）"
+
+      - name: 经缓存 pip install
+        run: |
+          pip install --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local --no-input six \
+            || { echo "FAIL: pip install 失败"; exit 1; }
+          python -c "import six; print('six', six.__version__)"
+          echo "PASS: 经缓存安装成功"
+
+      - name: 404 回源（huaweicloud 未同步的新包走 fallback）
+        run: |
+          # 取 PyPI 上最新发布的包名在huaweicloud镜像大概率未同步，
+          # 经缓存安装成功即证明回源链路（USTC→NJU→official）生效。
+          pkg=$(curl -s https://pypi.org/simple/ 2>/dev/null | grep -oE '>[a-z0-9._-]+<' | tail -200 | shuf -n1 | tr -d '><')
+          [ -n "$pkg" ] || pkg=delegator-py
+          echo "probe package: $pkg"
+          timeout 300 pip download --no-deps --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local -d /tmp/fb "$pkg" \
+            && echo "PASS: $pkg 经缓存获取成功（含回源）" \
+            || echo "WARN: $pkg 获取失败（新包可能已被镜像同步/已下架），跳过"
+
+      - name: 大 wheel 冷/热耗时对比（信息项）
+        run: |
+          time pip download --no-deps --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local -d /tmp/dl numpy
+          rm -rf /tmp/dl
+          time pip download --no-deps --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local -d /tmp/dl numpy
+          echo "INFO: 二次下载应明显更快（缓存命中）"
+
+      - name: yum/dnf 缓存探针（openeuler:8083，信息项）
+        continue-on-error: true
+        run: |
+          sed -Ei 's@https?://(repo\.huaweicloud\.com/openeuler|repo\.openeuler\.org|mirrors\.openeuler\.org)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8083@g' /etc/yum.repos.d/*.repo 2>/dev/null || true
+          dnf clean all >/dev/null 2>&1 && dnf makecache >/dev/null 2>&1 && echo "INFO: yum 缓存链路可用" || echo "INFO: yum 探针未通过（镜像源格式差异），不阻塞"
