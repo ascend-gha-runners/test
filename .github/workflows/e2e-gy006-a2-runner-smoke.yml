@@ -69,7 +69,7 @@ jobs:
         run: |
           [ -d /root/.cache ] || { echo "FAIL: /root/.cache 未挂载"; exit 1; }
           # 文件名按 pod 唯一：多个 job 共享同一 SFS 目录，固定名会互相踩（实测踩过）
-          f=/root/.cache/.e2e-write-test-$(hostname)-$$
+          f=/root/.cache/.e2e-write-test-${GITHUB_RUN_ID}-${{ matrix.n }}-$$
           touch "$f" && rm "$f" && echo "wrote $f" || { echo "FAIL: 共享缓存不可写"; exit 1; }
           df -h /root/.cache
           echo "PASS: 共享缓存可写"
