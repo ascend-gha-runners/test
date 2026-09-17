@@ -87,6 +87,23 @@ jobs:
           fi
           echo "PASS: crates 缓存链路正常"
 
+      - name: crates 回退确定性断言（bogus crate → X-Cache-Tier）
+        run: |
+          CRATES=http://cache-service.nginx-pypi-cache.svc.cluster.local:8085
+          bogus="e2e-bogus-crate-${GITHUB_RUN_ID}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+            "$CRATES/api/v1/crates/$bogus/1.0.0/download")
+          served=$(curl -sI --max-time 30 "$CRATES/api/v1/crates/$bogus/1.0.0/download" \
+            | grep -i x-cache-tier | tr -d '\r' | awk '{print $2}')
+          echo "bogus-crate: $code, X-Cache-Tier: ${served:-<absent>}"
+          if [ -n "$served" ]; then
+            echo "$served" | grep -qE "crates-official|ustc" \
+              || { echo "FAIL: X-Cache-Tier=$served 非预期层级"; exit 1; }
+            echo "PASS: crates 回退链确定性成立（最终 $code，由 $served 服务）"
+          else
+            echo "WARN: X-Cache-Tier 未上线（ascend-ci-deployment#1679 未部署），跳过回退断言"
+          fi
+
       - name: 大 wheel 冷/热耗时对比（信息项）
         run: |
           time pip download --no-deps --index-url "$INDEX" --trusted-host \
