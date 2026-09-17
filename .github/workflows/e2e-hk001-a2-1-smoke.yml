@@ -5,9 +5,20 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      target:
+        description: '选择目标集群'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - gy001
+          - wlcb001
 
 jobs:
   smoke-gy001:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'gy001' }}
     runs-on: linux-aarch64-a2-1-gy001
     timeout-minutes: 90
     container:
@@ -79,6 +90,7 @@ jobs:
           echo "PASS: 共享缓存可写"
 
   smoke-wlcb001:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'wlcb001' }}
     runs-on: linux-aarch64-a2-1-wlcb001
     timeout-minutes: 90
     container:
