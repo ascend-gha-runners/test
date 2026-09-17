@@ -1,0 +1,122 @@
+name: e2e-hk001-a2-1-smoke
+# hk-001 组织级 A2 整卡 1 卡 runner（gy-001 / wlcb-001）端到端冒烟
+# 覆盖：label 调度 / aarch64 / NPU 卡数 / git-cdn / nginx-pypi-cache / 共享缓存挂载
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-gy001:
+    runs-on: linux-aarch64-a2-1-gy001
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      INDEX: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+    steps:
+      - name: 环境与架构
+        run: |
+          echo "runner=$(hostname)"
+          uname -m | grep -qx aarch64 || { echo "FAIL: 架构不是 aarch64"; exit 1; }
+          echo "PASS: aarch64"
+
+      - name: NPU 卡数 = 1
+        run: |
+          npu-smi info
+          got=$(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)
+          echo "davinci devices: $got, expect 1"
+          [ "$got" -eq 1 ] || { echo "FAIL: NPU 卡数不符"; exit 1; }
+          echo "PASS: NPU 卡数 = 1"
+
+      - name: git-cdn 代理
+        run: |
+          git config --get-regexp insteadof || true
+          git clone --depth 1 https://github.com/ascend-gha-runners/test /tmp/t \
+            || { echo "FAIL: git clone 失败（git-cdn 未生效）"; exit 1; }
+          ls /tmp/t/.github/workflows
+          echo "PASS: git-cdn clone 成功"
+
+      - name: nginx-pypi-cache 缓存链路
+        run: |
+          h1=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          echo "first=$h1 second=$h2"
+          [ -n "$h1" ] || { echo "FAIL: 响应无 X-Pypi-Cache 头，请求未经过缓存"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: MISS 后未命中"; exit 1; }
+          fi
+          echo "PASS: 请求经过 nginx-pypi-cache（$h1 → $h2）"
+
+      - name: 经缓存 pip install
+        run: |
+          pip install --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local --no-input six \
+            || { echo "FAIL: pip install 失败"; exit 1; }
+          python -c "import six; print('six', six.__version__)"
+          echo "PASS: 经缓存安装成功"
+
+      - name: 共享缓存挂载（/root/.cache）
+        run: |
+          [ -d /root/.cache ] || { echo "FAIL: /root/.cache 未挂载"; exit 1; }
+          f=/root/.cache/.e2e-write-test-${GITHUB_RUN_ID}-gy001-$$
+          touch "$f" && rm "$f" || { echo "FAIL: 共享缓存不可写"; exit 1; }
+          df -h /root/.cache
+          echo "PASS: 共享缓存可写"
+
+  smoke-wlcb001:
+    runs-on: linux-aarch64-a2-1-wlcb001
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      INDEX: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+    steps:
+      - name: 环境与架构
+        run: |
+          echo "runner=$(hostname)"
+          uname -m | grep -qx aarch64 || { echo "FAIL: 架构不是 aarch64"; exit 1; }
+          echo "PASS: aarch64"
+
+      - name: NPU 卡数 = 1
+        run: |
+          npu-smi info
+          got=$(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)
+          echo "davinci devices: $got, expect 1"
+          [ "$got" -eq 1 ] || { echo "FAIL: NPU 卡数不符"; exit 1; }
+          echo "PASS: NPU 卡数 = 1"
+
+      - name: git-cdn 代理
+        run: |
+          git config --get-regexp insteadof || true
+          git clone --depth 1 https://github.com/ascend-gha-runners/test /tmp/t \
+            || { echo "FAIL: git clone 失败（git-cdn 未生效）"; exit 1; }
+          ls /tmp/t/.github/workflows
+          echo "PASS: git-cdn clone 成功"
+
+      - name: nginx-pypi-cache 缓存链路
+        run: |
+          h1=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -sI "$INDEX/six/" | grep -i x-pypi-cache | tr -d '\r' | awk '{print $2}')
+          echo "first=$h1 second=$h2"
+          [ -n "$h1" ] || { echo "FAIL: 响应无 X-Pypi-Cache 头，请求未经过缓存"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: MISS 后未命中"; exit 1; }
+          fi
+          echo "PASS: 请求经过 nginx-pypi-cache（$h1 → $h2）"
+
+      - name: 经缓存 pip install
+        run: |
+          pip install --index-url "$INDEX" --trusted-host \
+            cache-service.nginx-pypi-cache.svc.cluster.local --no-input six \
+            || { echo "FAIL: pip install 失败"; exit 1; }
+          python -c "import six; print('six', six.__version__)"
+          echo "PASS: 经缓存安装成功"
+
+      - name: 共享缓存挂载（/root/.cache）
+        run: |
+          [ -d /root/.cache ] || { echo "FAIL: /root/.cache 未挂载"; exit 1; }
+          f=/root/.cache/.e2e-write-test-${GITHUB_RUN_ID}-wlcb001-$$
+          touch "$f" && rm "$f" || { echo "FAIL: 共享缓存不可写"; exit 1; }
+          df -h /root/.cache
+          echo "PASS: 共享缓存可写"
