@@ -113,6 +113,16 @@ jobs:
             cache-service.nginx-pypi-cache.svc.cluster.local -d /tmp/dl numpy
           echo "INFO: 二次下载应明显更快（缓存命中）"
 
+      - name: 缓存卷容量检查（信息项，>85% 告警）
+        run: |
+          df -h /root/.cache | tail -1
+          usage=$(df /root/.cache | tail -1 | awk '{print int($5)}')
+          if [ "$usage" -ge 85 ]; then
+            echo "WARN: 缓存卷使用率 ${usage}% ≥ 85%，请检查同 SFS 的其他租户或扩容（nginx 各缓存有独立 max_size，但卷满会 ENOSPC）"
+          else
+            echo "INFO: 缓存卷使用率 ${usage}%，正常"
+          fi
+
       - name: yum/dnf 缓存探针（openeuler:8083，信息项）
         continue-on-error: true
         run: |
