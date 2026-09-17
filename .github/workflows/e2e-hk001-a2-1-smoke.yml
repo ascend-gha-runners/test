@@ -8,13 +8,33 @@ on:
 
 jobs:
   smoke-gy001:
-    runs-on: linux-aarch64-a2-1-gy001
+    runs-on: gy-001
     timeout-minutes: 90
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
       INDEX: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
     steps:
+      - name: 磁盘容量与 PVC 挂载情况
+        run: |
+          echo "=== 所有文件系统 ==="
+          df -hT
+          echo ""
+          echo "=== inode 使用率 ==="
+          df -ih
+          echo ""
+          echo "=== 挂载点（含 PVC/NFS/CSI）==="
+          mount | grep -vE '^(proc|sysfs|devpts|tmpfs|cgroup|mqueue|hugetlbfs|devtmpfs|overlay|none)' | sort
+          echo ""
+          echo "=== /root/.cache 目录占用（top-level）==="
+          if [ -d /root/.cache ]; then
+            du -sh /root/.cache/* 2>/dev/null | sort -rh | head -20 || echo "(空)"
+            echo "--- 合计 ---"
+            du -sh /root/.cache
+          else
+            echo "/root/.cache 不存在（PVC 未挂载）"
+          fi
+
       - name: 环境与架构
         run: |
           echo "runner=$(hostname)"
@@ -65,13 +85,33 @@ jobs:
           echo "PASS: 共享缓存可写"
 
   smoke-wlcb001:
-    runs-on: linux-aarch64-a2-1-wlcb001
+    runs-on: wlcb-001
     timeout-minutes: 90
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
       INDEX: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
     steps:
+      - name: 磁盘容量与 PVC 挂载情况
+        run: |
+          echo "=== 所有文件系统 ==="
+          df -hT
+          echo ""
+          echo "=== inode 使用率 ==="
+          df -ih
+          echo ""
+          echo "=== 挂载点（含 PVC/NFS/CSI）==="
+          mount | grep -vE '^(proc|sysfs|devpts|tmpfs|cgroup|mqueue|hugetlbfs|devtmpfs|overlay|none)' | sort
+          echo ""
+          echo "=== /root/.cache 目录占用（top-level）==="
+          if [ -d /root/.cache ]; then
+            du -sh /root/.cache/* 2>/dev/null | sort -rh | head -20 || echo "(空)"
+            echo "--- 合计 ---"
+            du -sh /root/.cache
+          else
+            echo "/root/.cache 不存在（PVC 未挂载）"
+          fi
+
       - name: 环境与架构
         run: |
           echo "runner=$(hostname)"
