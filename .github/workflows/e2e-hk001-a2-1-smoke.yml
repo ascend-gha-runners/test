@@ -26,14 +26,8 @@ jobs:
           echo "=== 挂载点（含 PVC/NFS/CSI）==="
           mount | grep -vE '^(proc|sysfs|devpts|tmpfs|cgroup|mqueue|hugetlbfs|devtmpfs|overlay|none)' | sort
           echo ""
-          echo "=== /root/.cache 目录占用（top-level）==="
-          if [ -d /root/.cache ]; then
-            du -sh /root/.cache/* 2>/dev/null | sort -rh | head -20 || echo "(空)"
-            echo "--- 合计 ---"
-            du -sh /root/.cache
-          else
-            echo "/root/.cache 不存在（PVC 未挂载）"
-          fi
+          echo "=== /root/.cache 挂载状态 ==="
+          df -h /root/.cache 2>/dev/null || echo "/root/.cache 不存在（PVC 未挂载）"
 
       - name: 环境与架构
         run: |
@@ -103,14 +97,8 @@ jobs:
           echo "=== 挂载点（含 PVC/NFS/CSI）==="
           mount | grep -vE '^(proc|sysfs|devpts|tmpfs|cgroup|mqueue|hugetlbfs|devtmpfs|overlay|none)' | sort
           echo ""
-          echo "=== /root/.cache 目录占用（top-level）==="
-          if [ -d /root/.cache ]; then
-            du -sh /root/.cache/* 2>/dev/null | sort -rh | head -20 || echo "(空)"
-            echo "--- 合计 ---"
-            du -sh /root/.cache
-          else
-            echo "/root/.cache 不存在（PVC 未挂载）"
-          fi
+          echo "=== /root/.cache 挂载状态 ==="
+          df -h /root/.cache 2>/dev/null || echo "/root/.cache 不存在（PVC 未挂载）"
 
       - name: 环境与架构
         run: |
