@@ -71,6 +71,22 @@ jobs:
           [ "$ccode" = "200" ] || { echo "FAIL: 缓存未回源 (got $ccode)"; exit 1; }
           echo "PASS: 直连404+缓存200 确定回源（$hit）"
 
+      - name: crates.io 缓存（8085，sparse index + 下载）
+        run: |
+          CRATES=http://cache-service.nginx-pypi-cache.svc.cluster.local:8085
+          dl=$(curl -s --max-time 20 "$CRATES/index/config.json" | grep -o '"dl": *"[^"]*"' | head -1)
+          echo "$dl"
+          echo "$dl" | grep -q "cache-service.nginx-pypi-cache.svc.cluster.local:8085" \
+            || { echo "FAIL: config.json dl 未改写到缓存"; exit 1; }
+          h1=$(curl -s -o /dev/null -D - --max-time 60 "$CRATES/api/v1/crates/anyhow/1.0.75/download" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --max-time 60 "$CRATES/api/v1/crates/anyhow/1.0.75/download" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+          echo "first=$h1 second=$h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Crates-Cache 头"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: crates 缓存链路正常"
+
       - name: 大 wheel 冷/热耗时对比（信息项）
         run: |
           time pip download --no-deps --index-url "$INDEX" --trusted-host \
