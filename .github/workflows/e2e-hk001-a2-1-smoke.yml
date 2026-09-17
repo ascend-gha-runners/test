@@ -8,7 +8,7 @@ on:
 
 jobs:
   smoke-gy001:
-    runs-on: gy-001
+    runs-on: linux-aarch64-a2-1-gy001
     timeout-minutes: 90
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
@@ -85,7 +85,7 @@ jobs:
           echo "PASS: 共享缓存可写"
 
   smoke-wlcb001:
-    runs-on: wlcb-001
+    runs-on: linux-aarch64-a2-1-wlcb001
     timeout-minutes: 90
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
