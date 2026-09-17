@@ -2,6 +2,8 @@
 
 ascend-gha-runners 的 runner e2e 测试仓库。
 
+**开发新用例前必读 [AGENTS.md](AGENTS.md)**(断言分级、确定性断言模式、已踩坑清单)。
+
 ## E2E 套件（贵阳006 组织级 A2 runner）
 
 基础设施变更（[ascend-ci-deployment](https://github.com/opensourceways/ascend-ci-deployment)）合入前，先在本仓库 dispatch 对应 e2e workflow 验证，全绿后再合入。
