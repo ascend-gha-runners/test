@@ -9,7 +9,7 @@ ascend-gha-runners 的 runner e2e 测试仓库。
 | Workflow | 覆盖 | 目标 runner |
 |---|---|---|
 | `e2e-gy006-a2-runner-smoke` | label 调度 / aarch64 / NPU 卡数(1/2/4/8) / CPU·内存配额 / git-cdn / 共享缓存挂载 | `linux-aarch64-a2-{1,2,4,8}` + `gy-006` |
-| `e2e-gy006-nginx-cache` | X-Pypi-Cache 命中 / 经缓存 pip install / 404 回源 / 大 wheel 冷热对比 / yum 探针 | `linux-aarch64-a2-1` + `gy-006` |
+| `e2e-gy006-nginx-cache` | X-Pypi-Cache 命中 / 经缓存 pip install / 404 回源确定性断言 / crates.io 缓存(8085) / 大 wheel 冷热对比 / yum 探针 | `linux-aarch64-a2-1` + `gy-006` |
 
 ### 运行方式
 
