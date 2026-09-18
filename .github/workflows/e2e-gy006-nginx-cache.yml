@@ -91,9 +91,13 @@ jobs:
         run: |
           CRATES=http://cache-service.nginx-pypi-cache.svc.cluster.local:8085
           bogus="e2e-bogus-crate-${GITHUB_RUN_ID}"
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+          # USTC 偶发抖动(实测出现过 30s 超时,同 job 内 pypi 层却正常),
+          # 加重试;重试后仍失败才判定
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 45 \
+            --retry 3 --retry-delay 3 --retry-all-errors \
             "$CRATES/api/v1/crates/$bogus/1.0.0/download")
-          served=$(curl -sI --max-time 30 "$CRATES/api/v1/crates/$bogus/1.0.0/download" \
+          served=$(curl -sI --max-time 45 --retry 3 --retry-delay 3 --retry-all-errors \
+            "$CRATES/api/v1/crates/$bogus/1.0.0/download" \
             | grep -i x-cache-tier | tr -d '\r' | awk '{print $2}')
           echo "bogus-crate: $code, X-Cache-Tier: ${served:-<absent>}"
           if [ -n "$served" ]; then
