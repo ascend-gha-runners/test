@@ -222,6 +222,10 @@ def test_pep658_metadata(index_url, package, sample_count):
 
 def test_pip_resolution(index_url, package):
     log("\nTesting pip install --dry-run resolution...")
+    # PyTorch 的 whl/cpu 页面极其庞大（上千个历史版本），不指定版本且 --no-cache-dir 时，
+    # pip 会对所有版本进行回溯解析，耗时可能超过 3-5 分钟。
+    # 我们指定一个确定的 cpu 版本（如 torch==2.4.0 或 torch）并加上 --timeout 60 和宽松的 subprocess timeout
+    target_spec = package if "==" in package else f"{package}==2.4.0"
     cmd = [
         sys.executable,
         "-m",
@@ -229,9 +233,11 @@ def test_pip_resolution(index_url, package):
         "install",
         "--dry-run",
         "--no-cache-dir",
+        "--timeout",
+        "30",
         "--index-url",
         index_url,
-        package,
+        target_spec,
     ]
     log(f"Running: {' '.join(cmd)}")
     try:
@@ -240,7 +246,7 @@ def test_pip_resolution(index_url, package):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=120,
+            timeout=300,
         )
         if proc.returncode == 0:
             log("Pip dry-run succeeded without hash mismatch!")
