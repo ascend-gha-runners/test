@@ -16,8 +16,8 @@
       "cluster": "hk-001",
       "arch": "amd64",
       "type": "cpu",
-      "labels": ["linux-amd64-cpu-2", "hk-001"],
-      "description": "香港001 纯 x86 CPU 测试 Runner（0 NPU 占用）"
+      "labels": ["linux-amd64-cpu-2-hk001"],
+      "description": "香港001 纯 x86 CPU 测试 Runner（ARC 0.13.0 单标签）"
     },
     {
       "name": "gy-006-aarch64-a2-1",
