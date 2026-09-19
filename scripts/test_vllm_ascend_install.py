@@ -116,11 +116,11 @@ def main():
     ascend_url = f"http://{cache_host}/ascend/repos/pypi/"
     torch_url = f"http://{cache_host}/whl/cpu/"
 
-    # Step 1: Probe endpoints
+    # Step 1: Probe endpoints using PEP 503 package paths (root index is blocked by upstream CDN)
     log("\n=== Phase 1: Probing all 3 internal repo endpoints ===")
-    ep_pypi = check_endpoint(pypi_url, "PyPI Simple")
-    ep_ascend = check_endpoint(ascend_url, "Ascend Repo (repo.huaweicloud.com)")
-    ep_torch = check_endpoint(torch_url, "PyTorch CPU Whl")
+    ep_pypi = check_endpoint(f"{pypi_url}/pip/", "PyPI Simple (/pypi/simple/pip/)")
+    ep_ascend = check_endpoint(f"{ascend_url}triton-ascend/", "Ascend Repo (/ascend/repos/pypi/triton-ascend/)")
+    ep_torch = check_endpoint(f"{torch_url}torch/", "PyTorch CPU Whl (/whl/cpu/torch/)")
 
     if not (ep_pypi and ep_ascend and ep_torch):
         log("One or more repository endpoints failed connectivity probe!", "ERROR")
