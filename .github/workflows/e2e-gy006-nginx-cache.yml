@@ -112,6 +112,27 @@ jobs:
             echo "WARN: X-Cache-Tier 未上线（ascend-ci-deployment#1715 未部署），跳过回退断言"
           fi
 
+      - name: PyTorch /whl/ 路由拆分验证（#1718 吸收）
+        run: |
+          WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
+          # torch 的索引页解析出一个 .whl 文件名
+          whl_link=$(curl -s --max-time 20 "$WHL/torch/" | grep -oE 'href="[^"]*\.whl"' | head -1 | sed 's/href="//;s/"//')
+          [ -n "$whl_link" ] || { echo "FAIL: torch 索引页无 .whl 链接"; exit 1; }
+          fname=$(basename "$whl_link")
+          echo "probe wheel: $fname"
+          # 1. torch 的 .metadata 应 200(回源 download.pytorch.org,hash 与索引一致)
+          mcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$WHL/torch/$fname.metadata")
+          echo "torch .metadata: $mcode"
+          [ "$mcode" = "200" ] || { echo "FAIL: torch .metadata 未回源 (got $mcode)"; exit 1; }
+          # 2. 非 torch 的 .metadata 应 404(新行为:防止 R2 checksum 损坏)
+          ncode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$WHL/jinja2-3.1.6-py3-none-any.whl.metadata")
+          echo "jinja2 .metadata: $ncode"
+          [ "$ncode" = "404" ] || { echo "FAIL: 非 torch metadata 应 404 (got $ncode)"; exit 1; }
+          # 3. .whl 应 200
+          wcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$WHL/torch/$fname")
+          [ "$wcode" = "200" ] || { echo "FAIL: whl got $wcode"; exit 1; }
+          echo "PASS: /whl/ 路由拆分验证通过(metadata 回源 DPO,whl 走 R2,非 torch 404)"
+
       - name: 大 wheel 冷/热耗时对比（信息项）
         run: |
           time pip download --no-deps --index-url "$INDEX" --trusted-host \
