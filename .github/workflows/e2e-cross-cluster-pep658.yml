@@ -34,6 +34,11 @@ on:
         required: false
         default: "5"
         type: string
+      simulate_vllm_install:
+        description: "是否执行 vLLM-Ascend 真实依赖安装模拟 (全内网源 + 忽略本地磁盘缓存)"
+        required: false
+        default: "true"
+        type: string
 
 jobs:
   matrix-setup:
@@ -121,6 +126,11 @@ jobs:
           python3 scripts/pep658_check.py \
             --index-url "${{ inputs.index_url }}" \
             --test-pip-dry-run
+
+      - name: vLLM-Ascend 真实依赖安装模拟（全内网源 + 忽略本地磁盘缓存）
+        if: ${{ inputs.simulate_vllm_install != 'false' }}
+        run: |
+          python3 scripts/test_vllm_ascend_install.py
 
       - name: 共享缓存读写校验（/root/.cache）
         run: |
