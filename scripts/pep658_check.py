@@ -244,6 +244,10 @@ def test_pip_resolution(index_url, package):
     if "://" in index_url:
         host = index_url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
         cmd.extend(["--trusted-host", host])
+        # PyTorch 的 whl/cpu 索引只包含 torch 自身，其基础依赖（如 filelock, jinja2）需通过 PyPI 索引解析
+        # 补充集群内部的 nginx /pypi/simple 作为 extra-index-url
+        extra_url = f"http://{host}/pypi/simple"
+        cmd.extend(["--extra-index-url", extra_url])
     cmd.append(target_spec)
     log(f"Running: {' '.join(cmd)}")
     try:
