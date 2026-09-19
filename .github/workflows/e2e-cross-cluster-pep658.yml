@@ -1,0 +1,144 @@
+name: e2e-cross-cluster-pep658
+# 跨集群全量 E2E 自动化测试：
+# 1. 架构与 Runner 供给解耦（通过 .github/config/runners.json 驱动）
+# 2. 验证各集群网络、DNS、nginx-pypi-cache、共享存储
+# 3. 核心专项：PyTorch Simple Index PEP 658 Metadata Checksum 完整性校验（针对 pytorch/pytorch#197552）
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "选择要测试的目标集群 (all / gy-006 / hk-001)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-006
+          - hk-001
+      runner_type:
+        description: "选择 Runner 类型 (all / cpu / npu)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cpu
+          - npu
+      index_url:
+        description: "PyTorch Simple Index 仓库地址"
+        required: false
+        default: "https://download.pytorch.org/whl/cpu"
+        type: string
+      sample_count:
+        description: "每个包采样的 Wheel 数量"
+        required: false
+        default: "5"
+        type: string
+
+jobs:
+  matrix-setup:
+    name: 动态解析测试矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all" and r.get("cluster") != target_cluster:
+                  continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Matrix selected ({len(selected)} runners): {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  pep658-e2e:
+    name: "${{ matrix.name }} [${{ matrix.cluster }}]"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 环境与出口诊断
+        run: |
+          echo "=== 节点与架构 ==="
+          echo "Hostname: $(cat /etc/hostname 2>/dev/null || uname -n)"
+          echo "Arch: $(uname -m)"
+          echo "Kernel: $(uname -r)"
+
+          echo -e "\n=== 内网 DNS 与出口网络 ==="
+          cat /etc/resolv.conf || true
+          echo -n "Outbound IP: "
+          curl -s --connect-timeout 5 https://api.ipify.org || echo "N/A"
+          echo ""
+
+          echo -e "\n=== Python / Pip 环境 ==="
+          python3 --version
+          python3 -m pip --version
+
+      - name: PEP 658 Metadata 校验（PyTorch Index 完整性）
+        run: |
+          python3 scripts/pep658_check.py \
+            --index-url "${{ inputs.index_url }}" \
+            --sample-count "${{ inputs.sample_count }}"
+
+      - name: Pip Dry-Run 依赖解析与下载链路校验
+        run: |
+          python3 scripts/pep658_check.py \
+            --index-url "${{ inputs.index_url }}" \
+            --test-pip-dry-run
+
+      - name: 共享缓存读写校验（/root/.cache）
+        run: |
+          if [ -d /root/.cache ]; then
+            echo "[PASS] /root/.cache 已挂载"
+            # 文件名带 GITHUB_RUN_ID 与 matrix 唯一标识，防多 Job 踩踏
+            TEST_FILE="/root/.cache/.pep658-e2e-${GITHUB_RUN_ID}-${{ matrix.name }}-$$"
+            touch "$TEST_FILE" && rm -f "$TEST_FILE"
+            echo "[PASS] /root/.cache 读写正常"
+            df -h /root/.cache
+          else
+            echo "[WARN] /root/.cache 未挂载，跳过"
+          fi
+
+      - name: git-cdn 连通性校验
+        run: |
+          git config --get-regexp insteadof || true
+          TMP_DIR="/tmp/git-cdn-test-${GITHUB_RUN_ID}-$$"
+          git clone --depth 1 https://github.com/ascend-gha-runners/test "$TMP_DIR"
+          rm -rf "$TMP_DIR"
+          echo "[PASS] git-cdn 仓库克隆正常"
