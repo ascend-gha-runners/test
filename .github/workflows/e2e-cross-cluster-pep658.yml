@@ -27,7 +27,7 @@ on:
       index_url:
         description: "PyTorch Simple Index 仓库地址"
         required: false
-        default: "https://download.pytorch.org/whl/cpu"
+        default: "http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
         type: string
       sample_count:
         description: "每个包采样的 Wheel 数量"

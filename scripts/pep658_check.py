@@ -30,7 +30,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Test PEP 658 Metadata Integrity")
     parser.add_argument(
         "--index-url",
-        default="https://download.pytorch.org/whl/cpu",
+        default="http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu",
         help="PyTorch simple repository index URL",
     )
     parser.add_argument(
@@ -86,7 +86,8 @@ def test_pep658_metadata(index_url, package, sample_count):
 
     server = headers.get("server", "-")
     tier = headers.get("x-cache-tier", headers.get("X-Cache-Tier", "none"))
-    log(f"Index status: {status}, Server: {server}, X-Cache-Tier: {tier}")
+    pypi_cache = headers.get("x-pypi-cache", headers.get("X-Pypi-Cache", "none"))
+    log(f"Index status: {status}, Server: {server}, X-Pypi-Cache: {pypi_cache}, X-Cache-Tier: {tier}")
 
     # Parse anchor tags
     link_pattern = re.compile(
@@ -185,9 +186,10 @@ def test_pep658_metadata(index_url, package, sample_count):
         meta_text = meta_bytes.decode("utf-8", errors="ignore")
         size = len(meta_bytes)
         tier = m_headers.get("x-cache-tier", m_headers.get("X-Cache-Tier", "none"))
+        pypi_cache = m_headers.get("x-pypi-cache", m_headers.get("X-Pypi-Cache", "none"))
 
         log(f"  Status: {m_status}, Size: {size} bytes, SHA256: {actual_sha256}")
-        log(f"  X-Cache-Tier: {tier}, Content-Type: {m_headers.get('content-type', '-')}")
+        log(f"  X-Pypi-Cache: {pypi_cache}, X-Cache-Tier: {tier}, Content-Type: {m_headers.get('content-type', '-')}")
 
         # Check basic RFC 822 / Metadata-Version format
         if "Metadata-Version:" in meta_text or "Name:" in meta_text:
@@ -237,8 +239,12 @@ def test_pip_resolution(index_url, package):
         "30",
         "--index-url",
         index_url,
-        target_spec,
     ]
+    # 若为 http 内部地址，追加 --trusted-host
+    if "://" in index_url:
+        host = index_url.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+        cmd.extend(["--trusted-host", host])
+    cmd.append(target_spec)
     log(f"Running: {' '.join(cmd)}")
     try:
         proc = subprocess.run(
