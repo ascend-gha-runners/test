@@ -1,0 +1,195 @@
+name: e2e-scan-pytorch-metadata
+# PyTorch Simple Index 全包 PEP 658 Metadata 完整性扫描 E2E 测试
+# 针对 pytorch/pytorch#197552 问题：
+# 扫描集群 nginx-pypi-cache 缓存源（或上游）中的所有包及其 wheel metadata
+# 校验：
+#   1. SHA-256 校验和一致性（对比 data-dist-info-metadata="sha256=..."）
+#   2. 是否残留 Checksum-SHA256: 尾部破坏行
+#   3. RFC 822 元数据格式规范（Metadata-Version, Name 等）
+#   4. 代理缓存命中与全量无损回放
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "选择目标集群 (gy-006 / hk-001 / cn12-001 / gy-005 / aiframework / all)"
+        required: false
+        default: "gy-006"
+        type: choice
+        options:
+          - gy-006
+          - hk-001
+          - cn12-001
+          - gy-005
+          - aiframework
+          - all
+      runner_type:
+        description: "选择 Runner 类型 (cpu / npu / all)"
+        required: false
+        default: "cpu"
+        type: choice
+        options:
+          - cpu
+          - npu
+          - all
+      index_url:
+        description: "PyTorch Simple Index 仓库地址 (支持集群内网缓存服务或官方源)"
+        required: false
+        default: "http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
+        type: string
+      scan_mode:
+        description: "扫描模式 (sample: 每包采样 / all: 全量历史 wheel 扫描 / single: 指定单包)"
+        required: false
+        default: "sample"
+        type: choice
+        options:
+          - sample
+          - all
+          - single
+      sample_per_pkg:
+        description: "采样模式下每个包抽检的最新 wheel 数量 (默认 5)"
+        required: false
+        default: "5"
+        type: string
+      package:
+        description: "指定单包模式下的包名 (如 torch, torchvision)"
+        required: false
+        default: ""
+        type: string
+      concurrency:
+        description: "并发并发扫描线程数 (默认 16)"
+        required: false
+        default: "16"
+        type: string
+
+jobs:
+  matrix-setup:
+    name: 动态解析测试矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all" and r.get("cluster") != target_cluster:
+                  continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Matrix selected ({len(selected)} runners): {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  scan-pytorch-metadata:
+    name: "Scan [${{ matrix.cluster }}] ${{ matrix.name }}"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 环境与连通性诊断
+        run: |
+          echo "=== 节点架构与内核 ==="
+          uname -a
+          python3 --version
+
+          echo -e "\n=== 目标源连通性检查 ==="
+          curl -s -I --connect-timeout 5 "${{ inputs.index_url }}/" | head -n 10 || echo "Target index connection check done"
+
+      - name: 执行 PyTorch 全包 PEP 658 Metadata 扫描
+        id: scan
+        run: |
+          SCAN_ARGS="--index-url ${{ inputs.index_url }} --concurrency ${{ inputs.concurrency }} --output-json scan_report_${{ matrix.name }}.json"
+
+          if [ "${{ inputs.scan_mode }}" = "all" ]; then
+            SCAN_ARGS="$SCAN_ARGS --all"
+          elif [ "${{ inputs.scan_mode }}" = "single" ]; then
+            SCAN_ARGS="$SCAN_ARGS --package ${{ inputs.package }}"
+          else
+            SCAN_ARGS="$SCAN_ARGS --sample-per-pkg ${{ inputs.sample_per_pkg }}"
+          fi
+
+          echo "Running scanner: python3 scripts/scan_pytorch_index_metadata.py $SCAN_ARGS"
+          python3 scripts/scan_pytorch_index_metadata.py $SCAN_ARGS
+
+      - name: 生成 GitHub Step 摘要
+        if: always()
+        run: |
+          REPORT_FILE="scan_report_${{ matrix.name }}.json"
+          if [ -f "$REPORT_FILE" ]; then
+            python3 -c '
+          import json, sys
+
+          with open("'"$REPORT_FILE"'", "r") as fp:
+              data = json.load(fp)
+
+          passed = data.get("passed", 0)
+          failed = data.get("failed", 0)
+          total = data.get("total_checked", 0)
+          pkgs_meta = data.get("packages_with_metadata", 0)
+          total_pkgs = data.get("total_packages", 0)
+          elapsed = data.get("elapsed_seconds", 0)
+
+          status_icon = "✅ PASS" if failed == 0 else "❌ FAIL"
+          summary = f"""### PyTorch Index PEP 658 Metadata Scan Report - {status_icon}
+
+  - **集群 / Runner**: `${{ matrix.cluster }}` / `${{ matrix.name }}`
+  - **Index URL**: `{data.get("index_url")}`
+  - **总包数**: `{total_pkgs}`
+  - **含 PEP 658 元数据的包数**: `{pkgs_meta}`
+  - **已校验 Metadata 文件数**: `{total}`
+  - **通过**: `{passed}`
+  - **失败 / 损坏**: `{failed}`
+  - **耗时**: `{elapsed:.2f}s`
+
+  """
+          if failed > 0:
+              summary += "\n#### 损坏详情\n| Package | Wheel | Error |\n|---|---|---|\n"
+              for f in data.get("failures", []):
+                  err_str = "<br>".join(f.get("errors", []))
+                  summary += f"| {f.get(\"package\", \"\")} | {f.get(\"wheel\", \"\")} | {err_str} |\n"
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as out:
+              out.write(summary)
+          '
+          fi
+
+      - name: 上传扫描报告 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-report-${{ matrix.name }}
+          path: scan_report_${{ matrix.name }}.json
+          retention-days: 7
