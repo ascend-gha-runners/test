@@ -20,6 +20,14 @@
       "description": "香港001 纯 x86 CPU 测试 Runner（ARC 0.13.0 单标签）"
     },
     {
+      "name": "hk-001-aarch64-a2-1",
+      "cluster": "hk-001",
+      "arch": "aarch64",
+      "type": "npu",
+      "labels": ["linux-aarch64-a2-1"],
+      "description": "香港001 A2 910B 1-card NPU Runner（ARC 0.13.0 单标签）"
+    },
+    {
       "name": "gy-006-aarch64-a2-1",
       "cluster": "gy-006",
       "arch": "aarch64",
