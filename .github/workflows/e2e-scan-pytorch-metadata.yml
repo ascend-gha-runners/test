@@ -7,7 +7,10 @@ name: e2e-scan-pytorch-metadata
 #   2. 是否残留 Checksum-SHA256: 尾部破坏行
 #   3. RFC 822 元数据格式规范（Metadata-Version, Name 等）
 #   4. 各集群代理缓存命中与全量无损回放
-'on':
+on:
+  schedule:
+    # 每天 UTC 00:00（北京时间 08:00）全量检查 CPU wheel 缓存。
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -47,7 +50,7 @@ name: e2e-scan-pytorch-metadata
       scan_mode:
         description: "扫描模式 (sample: 每包采样 / all: 全量历史 wheel 扫描 / single: 指定单包)"
         required: false
-        default: "sample"
+        default: "all"
         type: choice
         options:
           - sample
@@ -91,8 +94,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'gy-006' }}"
+          target_type = "${{ inputs.runner_type || 'cpu' }}"
 
           selected = []
           for r in runners:
@@ -129,6 +132,14 @@ jobs:
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      # Scheduled runs have no workflow_dispatch inputs; keep their target
+      # identical to the manual defaults.
+      INDEX_URL: ${{ inputs.index_url || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu' }}
+      SCAN_MODE: ${{ inputs.scan_mode || 'all' }}
+      CONCURRENCY: ${{ inputs.concurrency || '16' }}
+      SAMPLE_PER_PKG: ${{ inputs.sample_per_pkg || '5' }}
+      PACKAGE: ${{ inputs.package || '' }}
     steps:
       - name: 检出测试代码
         uses: actions/checkout@v4
@@ -140,23 +151,23 @@ jobs:
           python3 --version
 
           echo -e "\n=== 目标源连通性检查 ==="
-          curl -s -I --connect-timeout 5 "${{ inputs.index_url }}/" | head -n 10 || echo "Target index connection check done"
+          curl -s -I --connect-timeout 5 "$INDEX_URL/" | head -n 10 || echo "Target index connection check done"
 
       - name: 执行 PyTorch 全包 PEP 658 Metadata 扫描
         id: scan
         run: |
-          SCAN_ARGS="--index-url ${{ inputs.index_url }} \
-            --concurrency ${{ inputs.concurrency }} \
+          SCAN_ARGS="--index-url $INDEX_URL \
+            --concurrency $CONCURRENCY \
             --cluster ${{ matrix.cluster }} \
             --runner-name ${{ matrix.name }} \
             --output-json scan_report_${{ matrix.name }}.json"
 
-          if [ "${{ inputs.scan_mode }}" = "all" ]; then
+          if [ "$SCAN_MODE" = "all" ]; then
             SCAN_ARGS="$SCAN_ARGS --all"
-          elif [ "${{ inputs.scan_mode }}" = "single" ]; then
-            SCAN_ARGS="$SCAN_ARGS --package ${{ inputs.package }}"
+          elif [ "$SCAN_MODE" = "single" ]; then
+            SCAN_ARGS="$SCAN_ARGS --package $PACKAGE"
           else
-            SCAN_ARGS="$SCAN_ARGS --sample-per-pkg ${{ inputs.sample_per_pkg }}"
+            SCAN_ARGS="$SCAN_ARGS --sample-per-pkg $SAMPLE_PER_PKG"
           fi
 
           echo "Running scanner: python3 scripts/scan_pytorch_index_metadata.py $SCAN_ARGS"
