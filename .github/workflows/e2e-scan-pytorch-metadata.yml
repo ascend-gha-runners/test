@@ -1,27 +1,27 @@
 name: e2e-scan-pytorch-metadata
 # PyTorch Simple Index 全包 PEP 658 Metadata 完整性扫描 E2E 测试
 # 针对 pytorch/pytorch#197552 问题：
-# 扫描集群 nginx-pypi-cache 缓存源（或上游）中的所有包及其 wheel metadata
+# 默认跨所有集群并发执行，测试各集群独立部署的 nginx-pypi-cache 缓存健康度：
 # 校验：
 #   1. SHA-256 校验和一致性（对比 data-dist-info-metadata="sha256=..."）
 #   2. 是否残留 Checksum-SHA256: 尾部破坏行
 #   3. RFC 822 元数据格式规范（Metadata-Version, Name 等）
-#   4. 代理缓存命中与全量无损回放
-on:
+#   4. 各集群代理缓存命中与全量无损回放
+'on':
   workflow_dispatch:
     inputs:
       cluster:
-        description: "选择目标集群 (gy-006 / hk-001 / cn12-001 / gy-005 / aiframework / all)"
+        description: "选择目标集群 (默认 all: 测试所有集群缓存健康)"
         required: false
-        default: "gy-006"
+        default: "all"
         type: choice
         options:
+          - all
           - gy-006
           - hk-001
           - cn12-001
           - gy-005
           - aiframework
-          - all
       runner_type:
         description: "选择 Runner 类型 (cpu / npu / all)"
         required: false
@@ -99,7 +99,7 @@ jobs:
               sys.exit(1)
 
           matrix_json = json.dumps({"include": selected})
-          print(f"Matrix selected ({len(selected)} runners): {matrix_json}")
+          print(f"Matrix selected ({len(selected)} runners across clusters): {matrix_json}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
               gh_out.write(f"matrix={matrix_json}\n")
               gh_out.write(f"count={len(selected)}\n")
@@ -121,7 +121,7 @@ jobs:
 
       - name: 环境与连通性诊断
         run: |
-          echo "=== 节点架构与内核 ==="
+          echo "=== 节点架构与内核 [${{ matrix.cluster }}] ==="
           uname -a
           python3 --version
 
@@ -131,7 +131,11 @@ jobs:
       - name: 执行 PyTorch 全包 PEP 658 Metadata 扫描
         id: scan
         run: |
-          SCAN_ARGS="--index-url ${{ inputs.index_url }} --concurrency ${{ inputs.concurrency }} --output-json scan_report_${{ matrix.name }}.json"
+          SCAN_ARGS="--index-url ${{ inputs.index_url }} \
+            --concurrency ${{ inputs.concurrency }} \
+            --cluster ${{ matrix.cluster }} \
+            --runner-name ${{ matrix.name }} \
+            --output-json scan_report_${{ matrix.name }}.json"
 
           if [ "${{ inputs.scan_mode }}" = "all" ]; then
             SCAN_ARGS="$SCAN_ARGS --all"
@@ -151,3 +155,22 @@ jobs:
           name: scan-report-${{ matrix.name }}
           path: scan_report_${{ matrix.name }}.json
           retention-days: 7
+
+  aggregate-summary:
+    name: 跨集群缓存健康汇总
+    needs: [matrix-setup, scan-pytorch-metadata]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 下载各集群扫描报告
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scan-report-*
+          path: reports
+
+      - name: 汇总多集群健康结果
+        run: |
+          python3 scripts/aggregate_cluster_reports.py --reports-dir reports

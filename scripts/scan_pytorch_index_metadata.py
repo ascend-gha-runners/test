@@ -75,6 +75,16 @@ def parse_args():
         default="",
         help="Optional path to output results in JSON format",
     )
+    parser.add_argument(
+        "--cluster",
+        default="",
+        help="Target cluster name (e.g. gy-006, hk-001)",
+    )
+    parser.add_argument(
+        "--runner-name",
+        default="",
+        help="Runner name executing the scan",
+    )
     return parser.parse_args()
 
 
@@ -374,6 +384,8 @@ def main():
     if args.output_json:
         try:
             report_data = {
+                "cluster": args.cluster or os.environ.get("RUNNER_CLUSTER", "unknown"),
+                "runner": args.runner_name or os.environ.get("RUNNER_NAME", "unknown"),
                 "index_url": args.index_url,
                 "timestamp": time.time(),
                 "elapsed_seconds": elapsed,
@@ -394,9 +406,12 @@ def main():
     if step_summary_path:
         try:
             status_icon = "✅ PASS" if len(failed_items) == 0 else "❌ FAIL"
+            cluster_display = args.cluster or os.environ.get("RUNNER_CLUSTER", "local")
+            runner_display = args.runner_name or os.environ.get("RUNNER_NAME", "runner")
             summary_lines = [
                 f"### PyTorch Index PEP 658 Metadata Scan Report - {status_icon}",
                 "",
+                f"- **Cluster / Runner**: `{cluster_display}` / `{runner_display}`",
                 f"- **Index URL**: `{args.index_url}`",
                 f"- **Total Packages Scanned**: `{total_pkgs}`",
                 f"- **Packages with PEP 658 Metadata**: `{pkgs_with_metadata}`",
