@@ -13,20 +13,25 @@ on:
   workflow_dispatch:
     inputs:
       cluster:
-        description: "目标集群 (all / gy-006 / hk-001 / cn12-001 / gy-005 / aiframework / mind-third-ci / gy-004 / gy-003)"
+        description: "目标集群 (all / gy-001 / wlcb / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
         required: false
         default: "all"
         type: choice
         options:
           - all
-          - gy-006
-          - hk-001
-          - cn12-001
+          - gy-001
+          - wlcb
+          - sz-lab
+          - gy-003
+          - gy-004
           - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
           - aiframework
           - mind-third-ci
-          - gy-004
-          - gy-003
       runner_type:
         description: "Runner 类型 (all / cpu / npu)"
         required: false
