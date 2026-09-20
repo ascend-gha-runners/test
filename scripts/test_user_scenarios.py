@@ -278,18 +278,20 @@ registry = "sparse+{crates_index}"
     test_project_dir = tempfile.mkdtemp(prefix="vllm_cargo_test_")
     try:
         run_cmd(
-            ["cargo", "init", "--bin", "vllm_rust_verify"],
+            ["cargo", "new", "--bin", "vllm_rust_verify"],
             cwd=test_project_dir,
             env=rust_env,
-            desc="cargo init --bin vllm_rust_verify",
+            desc="cargo new --bin vllm_rust_verify",
         )
+        app_dir = os.path.join(test_project_dir, "vllm_rust_verify")
+
         # Add serde dependency (fetched through 8085 sparse index) directly to Cargo.toml
-        cargo_toml = os.path.join(test_project_dir, "Cargo.toml")
+        cargo_toml = os.path.join(app_dir, "Cargo.toml")
         with open(cargo_toml, "a") as f:
             f.write('serde = { version = "1.0.197", features = ["derive"] }\n')
 
         # Modify main.rs to use serde to guarantee code compilation against the crate
-        main_rs = os.path.join(test_project_dir, "src", "main.rs")
+        main_rs = os.path.join(app_dir, "src", "main.rs")
         with open(main_rs, "w") as f:
             f.write("""use serde::{Serialize, Deserialize};
 
@@ -307,15 +309,15 @@ fn main() {
     println!("[PASS] Rust binary executed with serde: {:?}", p);
 }
 """)
-        # Build binary (downloads crate payload & compiles)
+        # Build binary (downloads crate payload from 8085 & compiles)
         run_cmd(
             ["cargo", "build"],
-            cwd=test_project_dir,
+            cwd=app_dir,
             env=rust_env,
             desc="cargo build (fetching crate from 8085 and compiling)",
         )
         # Execute the built binary
-        bin_path = os.path.join(test_project_dir, "target", "debug", "vllm_rust_verify")
+        bin_path = os.path.join(app_dir, "target", "debug", "vllm_rust_verify")
         res = run_cmd([bin_path], env=rust_env, desc="Execute compiled Rust binary")
         if "[PASS]" not in res.stdout:
             raise RuntimeError(f"Rust binary output unexpected: {res.stdout}")
