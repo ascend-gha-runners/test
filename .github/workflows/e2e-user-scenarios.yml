@@ -37,9 +37,14 @@ on:
           - cpu
           - npu
       scenarios:
-        description: "选择测试场景 (all / os_pkg,pypi_uv,rust,git)"
+        description: "选择测试场景 (all / os_pkg,pypi_uv,rust,rust_403,git)"
         required: false
         default: "all"
+        type: string
+      strict_403:
+        description: "是否严格阻断 403 失败 (false: 仅检测并预警 PR #1722 缺失; true: 严格断言 403 回退成功)"
+        required: false
+        default: "false"
         type: string
       cache_host:
         description: "集群内网 nginx-pypi-cache 域名"
@@ -117,6 +122,12 @@ jobs:
 
       - name: 执行真实用户场景测试套件
         run: |
+          STRICT_FLAG=""
+          if [ "${{ inputs.strict_403 }}" = "true" ]; then
+            STRICT_FLAG="--strict-403"
+          fi
+
           python3 scripts/test_user_scenarios.py \
             --cache-host "${{ inputs.cache_host }}" \
-            --scenarios "${{ inputs.scenarios }}"
+            --scenarios "${{ inputs.scenarios }}" \
+            ${STRICT_FLAG}

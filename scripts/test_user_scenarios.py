@@ -315,8 +315,92 @@ fn main() -> Result<()> {
             raise RuntimeError(f"Rust binary output unexpected: {res.stdout}")
 
         log("[PASS] Rust toolchain install (8082) & Cargo sparse build (8085) succeeded.")
+        return rust_env
     finally:
         shutil.rmtree(test_project_dir, ignore_errors=True)
+
+
+# ==============================================================================
+# Scenario 3b: Crate Upstream 403 Fallback Verification (PR #1722 capability)
+# ==============================================================================
+def test_crates_403_fallback(cache_host: str, rust_env: dict, strict: bool = False):
+    """
+    Validates whether the cache service can gracefully handle upstream 403 Access Denied
+    (e.g., from USTC S3 mirror for unicode-ident/1.0.26) by falling back to official source.
+    This directly solidifies the production scenario targeted by PR #1722.
+    """
+    log("=== Scenario 3b: Crate Upstream 403 Fallback Verification (PR #1722) ===")
+
+    test_project_dir = tempfile.mkdtemp(prefix="vllm_cargo_403_test_")
+    try:
+        run_cmd(
+            ["cargo", "new", "--bin", "vllm_403_verify"],
+            cwd=test_project_dir,
+            env=rust_env,
+            desc="cargo new --bin vllm_403_verify",
+        )
+        app_dir = os.path.join(test_project_dir, "vllm_403_verify")
+
+        # serde with derive pulls unicode-ident/1.0.26 which returns 403 Access Denied on USTC S3
+        cargo_toml = os.path.join(app_dir, "Cargo.toml")
+        with open(cargo_toml, "a") as f:
+            f.write('serde = { version = "1.0.197", features = ["derive"] }\n')
+
+        main_rs = os.path.join(app_dir, "src", "main.rs")
+        with open(main_rs, "w") as f:
+            f.write("""use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+struct FallbackPayload {
+    code: u32,
+    scenario: String,
+}
+
+fn main() {
+    let p = FallbackPayload { code: 403, scenario: "upstream_fallback_success".to_string() };
+    println!("[PASS] 403 fallback crate compiled & executed: {:?}", p);
+}
+""")
+        log("Compiling crate with derive feature (triggers upstream 403 on unicode-ident)...")
+        proc = run_cmd(
+            ["cargo", "build"],
+            cwd=app_dir,
+            env=rust_env,
+            check=False,
+            desc="cargo build (testing 403 fallback on unicode-ident)",
+        )
+
+        if proc.returncode == 0:
+            bin_path = os.path.join(app_dir, "target", "debug", "vllm_403_verify")
+            res = run_cmd([bin_path], env=rust_env, desc="Execute 403-fallback compiled binary")
+            if "[PASS]" in res.stdout:
+                log("[PASS] 403 Fallback SUCCESS: Cache successfully recovered from upstream 403 and compiled crate via official fallback! (PR #1722 validated)")
+                return True
+            else:
+                raise RuntimeError(f"Binary execution failed: {res.stdout}")
+
+        # Check if the failure was specifically the 403 Access Denied issue
+        stdout = proc.stdout
+        is_403 = "got 403" in stdout or "AccessDenied" in stdout or "403" in stdout
+
+        if is_403:
+            msg = (
+                "[DETECTED 403] Upstream mirror returned HTTP 403 Access Denied on crate archive, "
+                "and cache service did NOT fall back to official crates source. "
+                "This confirms the exact production limitation addressed by PR #1722."
+            )
+            log(msg, "WARN")
+            if strict:
+                raise RuntimeError(msg)
+            return False
+        else:
+            log(f"[WARN] Cargo build failed with non-403 error: {stdout}", "WARN")
+            if strict:
+                raise RuntimeError(f"Cargo build failed: {stdout}")
+            return False
+    finally:
+        shutil.rmtree(test_project_dir, ignore_errors=True)
+
 
 
 # ==============================================================================
@@ -364,7 +448,13 @@ def parse_args():
     parser.add_argument(
         "--scenarios",
         default="all",
-        help="Comma-separated scenarios: os_pkg,pypi_uv,rust,git, or all",
+        help="Comma-separated scenarios: os_pkg,pypi_uv,rust,rust_403,git, or all",
+    )
+    parser.add_argument(
+        "--strict-403",
+        action="store_true",
+        default=False,
+        help="Fail test suite if upstream 403 fallback fails (PR #1722 capability)",
     )
     return parser.parse_args()
 
@@ -375,11 +465,13 @@ def main():
     arch = platform.machine()
     log(f"Starting Realistic End-User CI Test Suite on {arch} ({detect_os()})...")
     log(f"Cache Host: {cache_host}")
+    log(f"Strict 403 Fallback Enforcement: {args.strict_403}")
 
     selected_scenarios = [s.strip() for s in args.scenarios.split(",")]
     run_all = "all" in selected_scenarios
 
     failures = []
+    rust_env = None
 
     # 1. OS Package Manager
     if run_all or "os_pkg" in selected_scenarios:
@@ -397,13 +489,21 @@ def main():
             log(f"[FAIL] PyPI + UV scenario failed: {e}", "ERROR")
             failures.append("pypi_uv")
 
-    # 3. Rustup & Cargo
-    if run_all or "rust" in selected_scenarios:
+    # 3. Rustup & Cargo (Standard Crate)
+    if run_all or "rust" in selected_scenarios or "rust_403" in selected_scenarios:
         try:
-            test_rust_toolchain_and_cargo_build(cache_host)
+            rust_env = test_rust_toolchain_and_cargo_build(cache_host)
         except Exception as e:
             log(f"[FAIL] Rustup & Cargo scenario failed: {e}", "ERROR")
             failures.append("rust_cargo")
+
+    # 3b. Crate Upstream 403 Fallback (PR #1722)
+    if (run_all or "rust_403" in selected_scenarios) and rust_env:
+        try:
+            test_crates_403_fallback(cache_host, rust_env, strict=args.strict_403)
+        except Exception as e:
+            log(f"[FAIL] Upstream 403 fallback scenario failed: {e}", "ERROR")
+            failures.append("rust_403_fallback")
 
     # 4. Git Proxy
     if run_all or "git" in selected_scenarios:
