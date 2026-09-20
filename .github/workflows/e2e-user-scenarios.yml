@@ -1,0 +1,122 @@
+name: e2e-user-scenarios
+# 真实用户场景 E2E 跨集群测试流水线
+# 参考 vllm-project/vllm-ascend/.github/workflows/ 真实 CI 工作流与 Dockerfile 编写：
+# 1. 严格禁止单纯 curl 探测，所有测试用例均为实际工具链、包管理器、编译器的真实执行；
+# 2. 覆盖 vLLM-Ascend CI 核心全链路：
+#    - OS 包管理器：openEuler DNF/YUM (8083) / Ubuntu APT (8081)
+#    - Python 真实构建与安装：pip + uv (--no-cache-dir, unsafe-best-match, triton-ascend, torch)
+#    - Rust 工具链与 Crates 编译：rustup-init (8082) + cargo sparse index (8085) + 真实 crate 编译运行
+#    - Git 代理链路：gh-proxy.test.osinfra.cn 真实 git clone 检出
+# 3. 跨集群驱动：基于 .github/config/runners.json 支持全部 8 个集群 Runner 矩阵执行
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all / gy-006 / hk-001 / cn12-001 / gy-005 / aiframework / mind-third-ci / gy-004 / gy-003)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-006
+          - hk-001
+          - cn12-001
+          - gy-005
+          - aiframework
+          - mind-third-ci
+          - gy-004
+          - gy-003
+      runner_type:
+        description: "Runner 类型 (all / cpu / npu)"
+        required: false
+        default: "cpu"
+        type: choice
+        options:
+          - all
+          - cpu
+          - npu
+      scenarios:
+        description: "选择测试场景 (all / os_pkg,pypi_uv,rust,git)"
+        required: false
+        default: "all"
+        type: string
+      cache_host:
+        description: "集群内网 nginx-pypi-cache 域名"
+        required: false
+        default: "cache-service.nginx-pypi-cache.svc.cluster.local"
+        type: string
+
+jobs:
+  matrix-setup:
+    name: 解析集群 Runner 矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all" and r.get("cluster") != target_cluster:
+                  continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Selected {len(selected)} runners: {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  run-user-scenarios:
+    name: "${{ matrix.name }} [${{ matrix.cluster }}]"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 基础环境信息
+        run: |
+          echo "=== 节点信息 ==="
+          echo "Cluster: ${{ matrix.cluster }}"
+          echo "Runner:  ${{ matrix.name }}"
+          echo "Arch:    $(uname -m)"
+          echo "OS:      $(cat /etc/os-release | grep PRETTY_NAME || uname -s)"
+          python3 --version
+          python3 -m pip --version
+
+      - name: 执行真实用户场景测试套件
+        run: |
+          python3 scripts/test_user_scenarios.py \
+            --cache-host "${{ inputs.cache_host }}" \
+            --scenarios "${{ inputs.scenarios }}"
