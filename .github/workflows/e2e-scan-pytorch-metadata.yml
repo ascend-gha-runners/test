@@ -56,7 +56,7 @@ on:
         default: ""
         type: string
       concurrency:
-        description: "并发并发扫描线程数 (默认 16)"
+        description: "并发扫描线程数 (默认 16)"
         required: false
         default: "16"
         type: string
@@ -143,48 +143,6 @@ jobs:
 
           echo "Running scanner: python3 scripts/scan_pytorch_index_metadata.py $SCAN_ARGS"
           python3 scripts/scan_pytorch_index_metadata.py $SCAN_ARGS
-
-      - name: 生成 GitHub Step 摘要
-        if: always()
-        run: |
-          REPORT_FILE="scan_report_${{ matrix.name }}.json"
-          if [ -f "$REPORT_FILE" ]; then
-            python3 -c '
-          import json, sys
-
-          with open("'"$REPORT_FILE"'", "r") as fp:
-              data = json.load(fp)
-
-          passed = data.get("passed", 0)
-          failed = data.get("failed", 0)
-          total = data.get("total_checked", 0)
-          pkgs_meta = data.get("packages_with_metadata", 0)
-          total_pkgs = data.get("total_packages", 0)
-          elapsed = data.get("elapsed_seconds", 0)
-
-          status_icon = "✅ PASS" if failed == 0 else "❌ FAIL"
-          summary = f"""### PyTorch Index PEP 658 Metadata Scan Report - {status_icon}
-
-  - **集群 / Runner**: `${{ matrix.cluster }}` / `${{ matrix.name }}`
-  - **Index URL**: `{data.get("index_url")}`
-  - **总包数**: `{total_pkgs}`
-  - **含 PEP 658 元数据的包数**: `{pkgs_meta}`
-  - **已校验 Metadata 文件数**: `{total}`
-  - **通过**: `{passed}`
-  - **失败 / 损坏**: `{failed}`
-  - **耗时**: `{elapsed:.2f}s`
-
-  """
-          if failed > 0:
-              summary += "\n#### 损坏详情\n| Package | Wheel | Error |\n|---|---|---|\n"
-              for f in data.get("failures", []):
-                  err_str = "<br>".join(f.get("errors", []))
-                  summary += f"| {f.get(\"package\", \"\")} | {f.get(\"wheel\", \"\")} | {err_str} |\n"
-
-          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as out:
-              out.write(summary)
-          '
-          fi
 
       - name: 上传扫描报告 Artifact
         if: always()

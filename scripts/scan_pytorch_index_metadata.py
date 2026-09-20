@@ -390,6 +390,40 @@ def main():
         except Exception as e:
             log(f"Failed to write JSON output: {e}", "WARN")
 
+    step_summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary_path:
+        try:
+            status_icon = "✅ PASS" if len(failed_items) == 0 else "❌ FAIL"
+            summary_lines = [
+                f"### PyTorch Index PEP 658 Metadata Scan Report - {status_icon}",
+                "",
+                f"- **Index URL**: `{args.index_url}`",
+                f"- **Total Packages Scanned**: `{total_pkgs}`",
+                f"- **Packages with PEP 658 Metadata**: `{pkgs_with_metadata}`",
+                f"- **Total Metadata Files Checked**: `{len(results)}`",
+                f"- **Passed**: `{len(results) - len(failed_items)}`",
+                f"- **Failed / Corrupted**: `{len(failed_items)}`",
+                f"- **Elapsed Time**: `{elapsed:.2f}s`",
+                "",
+            ]
+            if failed_items:
+                summary_lines.extend([
+                    "#### 损坏 / 异常详情",
+                    "| Package | Wheel | Errors |",
+                    "|---|---|---|",
+                ])
+                for f in failed_items:
+                    pkg = f.get("package", "unknown")
+                    wheel = f.get("wheel", "")
+                    errs = "<br>".join(f.get("errors", []))
+                    summary_lines.append(f"| {pkg} | {wheel} | {errs} |")
+                summary_lines.append("")
+
+            with open(step_summary_path, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(summary_lines) + "\n")
+        except Exception as e:
+            log(f"Failed to write GITHUB_STEP_SUMMARY: {e}", "WARN")
+
     if failed_items:
         log("-" * 70)
         log(f"FAILURE DETAILS ({len(failed_items)} items):", "ERROR")
