@@ -283,13 +283,11 @@ registry = "sparse+{crates_index}"
             env=rust_env,
             desc="cargo init --bin vllm_rust_verify",
         )
-        # Add serde dependency (fetched through 8085 sparse index)
-        run_cmd(
-            ["cargo", "add", "serde", "--vers", "1.0.197"],
-            cwd=test_project_dir,
-            env=rust_env,
-            desc="cargo add serde via 8085 sparse index",
-        )
+        # Add serde dependency (fetched through 8085 sparse index) directly to Cargo.toml
+        cargo_toml = os.path.join(test_project_dir, "Cargo.toml")
+        with open(cargo_toml, "a") as f:
+            f.write('serde = { version = "1.0.197", features = ["derive"] }\n')
+
         # Modify main.rs to use serde to guarantee code compilation against the crate
         main_rs = os.path.join(test_project_dir, "src", "main.rs")
         with open(main_rs, "w") as f:
