@@ -18,6 +18,9 @@ on:
           - cn12-001
           - gy-005
           - aiframework
+          - mind-third-ci
+          - gy-004
+          - gy-003
       runner_type:
         description: "选择 Runner 类型 (all / cpu / npu)"
         required: false

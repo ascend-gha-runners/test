@@ -50,6 +50,30 @@
       "type": "cpu",
       "labels": ["linux-amd64-cpu-2-aiframe"],
       "description": "aiframework (hb-003) x86 CPU 测试 Runner（ARC 0.13.0）"
+    },
+    {
+      "name": "mind-third-ci-amd64-cpu-2",
+      "cluster": "mind-third-ci",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-2-mind-third"],
+      "description": "mind-third-ci (hb-003-verl) x86 CPU 测试 Runner（ARC 0.13.0）"
+    },
+    {
+      "name": "gy-004-amd64-cpu-4",
+      "cluster": "gy-004",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-4", "gy-004"],
+      "description": "贵阳004 x86 CPU 测试 Runner（ARC 0.14.2）"
+    },
+    {
+      "name": "gy-003-amd64-cpu-2",
+      "cluster": "gy-003",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-2-gy003"],
+      "description": "贵阳003 x86 CPU 测试 Runner（ARC 0.13.0）"
     }
   ]
 }

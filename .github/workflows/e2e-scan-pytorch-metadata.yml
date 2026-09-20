@@ -22,6 +22,9 @@ name: e2e-scan-pytorch-metadata
           - cn12-001
           - gy-005
           - aiframework
+          - mind-third-ci
+          - gy-004
+          - gy-003
       runner_type:
         description: "选择 Runner 类型 (cpu / npu / all)"
         required: false
