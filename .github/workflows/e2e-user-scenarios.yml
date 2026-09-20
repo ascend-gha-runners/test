@@ -107,6 +107,10 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     steps:
+      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
+
       - name: 检出测试仓库
         uses: actions/checkout@v4
 
