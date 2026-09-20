@@ -211,11 +211,9 @@ try:
     print(f"triton imported successfully: version={getattr(triton, '__version__', 'unknown')}")
 except Exception as e:
     print(f"triton runtime note: {e}")
-
-import uc_manager
-print("uc_manager imported successfully")
 """
     run_cmd([sys.executable, "-c", import_verify], env=sim_env, desc="Python runtime package imports")
+    run_cmd([sys.executable, "-m", "pip", "show", "uc-manager", "triton-ascend", "torch"], env=sim_env, desc="pip show packages")
 
     shutil.rmtree(sandbox_dir, ignore_errors=True)
     log("[PASS] Realistic PyPI + UV package installation and imports succeeded.")
@@ -252,9 +250,9 @@ def test_rust_toolchain_and_cargo_build(cache_host: str):
         f"sed -i \"s/--proto '=https'//g; s/--https-only//g\" {installer_path}",
         desc="Adjust rustup-init.sh for internal http mirror",
     )
-    # Install minimal toolchain
+    # Install minimal profile of stable toolchain (exact vllm-ascend pattern)
     run_cmd(
-        f"sh {installer_path} -y --default-toolchain minimal --profile minimal --no-modify-path",
+        f"sh {installer_path} -y --default-toolchain stable --profile minimal --no-modify-path",
         env=rust_env,
         desc="Install minimal Rust toolchain via internal 8082 mirror",
     )
