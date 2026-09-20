@@ -15,6 +15,9 @@ on:
           - all
           - gy-006
           - hk-001
+          - cn12-001
+          - gy-005
+          - aiframework
       runner_type:
         description: "选择 Runner 类型 (all / cpu / npu)"
         required: false
