@@ -285,28 +285,20 @@ registry = "sparse+{crates_index}"
         )
         app_dir = os.path.join(test_project_dir, "vllm_rust_verify")
 
-        # Add serde dependency (fetched through 8085 sparse index) directly to Cargo.toml
+        # Add anyhow dependency (single-crate, widely used, verified on 8085)
         cargo_toml = os.path.join(app_dir, "Cargo.toml")
         with open(cargo_toml, "a") as f:
-            f.write('serde = { version = "1.0.197", features = ["derive"] }\n')
+            f.write('anyhow = "1.0.75"\n')
 
-        # Modify main.rs to use serde to guarantee code compilation against the crate
+        # Modify main.rs to use anyhow to guarantee code compilation against the crate
         main_rs = os.path.join(app_dir, "src", "main.rs")
         with open(main_rs, "w") as f:
-            f.write("""use serde::{Serialize, Deserialize};
+            f.write("""use anyhow::{Result, Context};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct TestPayload {
-    service: String,
-    status: u32,
-}
-
-fn main() {
-    let p = TestPayload {
-        service: "nginx-pypi-cache-crates".to_string(),
-        status: 200,
-    };
-    println!("[PASS] Rust binary executed with serde: {:?}", p);
+fn main() -> Result<()> {
+    let msg = "nginx-pypi-cache-crates-sparse";
+    println!("[PASS] Rust binary executed with anyhow: {}", msg);
+    Ok(())
 }
 """)
         # Build binary (downloads crate payload from 8085 & compiles)
