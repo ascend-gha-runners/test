@@ -14,11 +14,11 @@
     },
     {
       "name": "wlcb-aarch64-a2-1",
-      "cluster": "wlcb",
+      "cluster": "wlcb-001",
       "arch": "aarch64",
       "type": "npu",
       "model": "a2",
-      "labels": ["linux-aarch64-a2-1", "wlcb"],
+      "labels": ["linux-aarch64-a2-1", "wlcb-001"],
       "description": "乌兰察布001 A2 910B 1卡 NPU Runner"
     },
     {

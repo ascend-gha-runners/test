@@ -20,7 +20,7 @@ on:
         options:
           - all
           - gy-001
-          - wlcb
+          - wlcb-001
           - sz-lab
           - gy-003
           - gy-004
