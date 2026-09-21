@@ -156,6 +156,25 @@
       "type": "cpu",
       "labels": ["linux-amd64-cpu-2", "mind-third-ci"],
       "description": "mind-third-ci (hb-003-verl) x86 CPU 测试 Runner"
+    },
+    {
+      "name": "aiframework-aarch64-a3-2",
+      "cluster": "aiframework",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "aiframework"],
+      "description": "aiframework (hb-003) A3 910C 2卡 NPU Runner"
+    },
+    {
+      "name": "mind-third-ci-aarch64-a3-2",
+      "cluster": "mind-third-ci",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "mind-third-ci"],
+      "description": "mind-third-ci (hb-003-verl) A3 910C 2卡 NPU Runner"
     }
   ]
 }
+
