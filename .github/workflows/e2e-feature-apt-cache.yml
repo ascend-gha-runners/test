@@ -10,6 +10,9 @@ name: e2e-feature-apt-cache
 # 3. 校验已安装工具链执行与版本
 
 on:
+  schedule:
+    # 每天 UTC 02:30（北京时间 10:30）全集群 APT 缓存（Port 8081）验证
+    - cron: "30 2 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -69,8 +72,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -109,7 +112,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
     env:
       DEBIAN_FRONTEND: noninteractive
-      CACHE_HOST: ${{ inputs.cache_host }}
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
     steps:
       - name: 基础环境与操作系统诊断
         run: |
@@ -122,17 +125,17 @@ jobs:
       - name: 1. 探测内网 APT 缓存端口（8081）连通性
         run: |
           echo "=== 探测 APT 缓存服务 (8081) ==="
-          curl -sI --connect-timeout 5 "http://${{ inputs.cache_host }}:8081" || echo "Note: Port 8081 root index may close or redirect, proceeding to apt repository test"
+          curl -sI --connect-timeout 5 "http://${CACHE_HOST}:8081" || echo "Note: Port 8081 root index may close or redirect, proceeding to apt repository test"
 
       - name: 2. 按照文档与 vLLM-Ascend 规范配置 APT 源
         run: |
           echo "=== 替换 /etc/apt/sources.list 指向 8081 缓存 ==="
-          sed -Ei "s@(ports|archive).ubuntu.com@${{ inputs.cache_host }}:8081@g" /etc/apt/sources.list
+          sed -Ei "s@(ports|archive).ubuntu.com@${CACHE_HOST}:8081@g" /etc/apt/sources.list
           if [ -d /etc/apt/sources.list.d ]; then
-            sed -Ei "s@(ports|archive).ubuntu.com@${{ inputs.cache_host }}:8081@g" /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            sed -Ei "s@(ports|archive).ubuntu.com@${CACHE_HOST}:8081@g" /etc/apt/sources.list.d/*.list 2>/dev/null || true
           fi
           echo "=== sources.list 校验 ==="
-          grep -E "${{ inputs.cache_host }}:8081" /etc/apt/sources.list | head -n 10
+          grep -E "${CACHE_HOST}:8081" /etc/apt/sources.list | head -n 10
 
       - name: 3. 经内网缓存真实执行 apt-get update
         run: |

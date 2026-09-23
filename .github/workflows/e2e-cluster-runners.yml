@@ -3,6 +3,9 @@ name: e2e-cluster-runners
 # 验证所有 13 个集群通过 [型号, 区域] 双标签正确调度并执行作业
 
 on:
+  schedule:
+    # 每天 UTC 01:00（北京时间 09:00）全集群双标签与连通性验证
+    - cron: "0 1 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -69,9 +72,9 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
-          target_model = "${{ inputs.model }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
+          target_model = "${{ inputs.model || 'all' }}"
 
           selected = []
           for r in runners:

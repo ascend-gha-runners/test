@@ -11,6 +11,9 @@ name: e2e-feature-rustup-cache
 # 3. 验证 rustc 与 cargo 执行与环境连通
 
 on:
+  schedule:
+    # 每天 UTC 03:00（北京时间 11:00）全集群 Rust/rustup 缓存（Port 8082）验证
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -70,8 +73,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -109,9 +112,9 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
-      CACHE_HOST: ${{ inputs.cache_host }}
-      RUSTUP_DIST_SERVER: http://${{ inputs.cache_host }}:8082/rustup
-      RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host }}:8082/rustup/rustup
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      RUSTUP_DIST_SERVER: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup
+      RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup/rustup
       CARGO_HOME: /root/.cargo
       RUSTUP_HOME: /root/.rustup
     steps:

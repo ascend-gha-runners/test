@@ -13,6 +13,9 @@ name: e2e-feature-pypi-cache
 # 5. 404 回退机制：未同步包自动回源到 pypi.org
 
 on:
+  schedule:
+    # 每天 UTC 02:00（北京时间 10:00）全集群 PyPI 缓存与 PyTorch Wheel 验证
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -77,8 +80,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -117,17 +120,18 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
-      CACHE_HOST: ${{ inputs.cache_host }}
-      INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
-      WHL_URL: http://${{ inputs.cache_host }}/whl/cpu
-      PIP_INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
-      PIP_TRUSTED_HOST: ${{ inputs.cache_host }}
-      UV_INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
-      UV_INSECURE_HOST: ${{ inputs.cache_host }}
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
+      WHL_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/whl/cpu
+      PIP_INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
+      PIP_TRUSTED_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      UV_INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
+      UV_INSECURE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
+      TORCH_VERSION: ${{ inputs.torch_version || '2.4.0' }}
     steps:
       - name: 检出测试仓库
         uses: actions/checkout@v4
@@ -174,7 +178,7 @@ jobs:
           curl -sI --max-time 15 "${WHL_URL}/torch/" | head -n 10 || true
 
           echo "=== 经内网 /whl 路径真实安装 PyTorch CPU ==="
-          torch_spec="torch>=${{ inputs.torch_version }},<${{ inputs.torch_version }}.99"
+          torch_spec="torch>=${TORCH_VERSION},<${TORCH_VERSION}.99"
           uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}"
           python3 -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}')"
 

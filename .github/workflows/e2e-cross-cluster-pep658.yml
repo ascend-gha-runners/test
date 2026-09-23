@@ -4,6 +4,9 @@ name: e2e-cross-cluster-pep658
 # 2. 验证各集群网络、DNS、nginx-pypi-cache、共享存储
 # 3. 核心专项：PyTorch Simple Index PEP 658 Metadata Checksum 完整性校验（针对 pytorch/pytorch#197552）
 on:
+  schedule:
+    # 每天 UTC 04:30（北京时间 12:30）全集群 PyTorch PEP 658 元数据抽检与端到端链路验证
+    - cron: "30 4 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -73,8 +76,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -111,6 +114,9 @@ jobs:
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      INDEX_URL: ${{ inputs.index_url || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu' }}
+      SAMPLE_COUNT: ${{ inputs.sample_count || '5' }}
     steps:
       - name: 检出测试代码
         uses: actions/checkout@v4
@@ -135,17 +141,17 @@ jobs:
       - name: PEP 658 Metadata 校验（PyTorch Index 完整性）
         run: |
           python3 scripts/pep658_check.py \
-            --index-url "${{ inputs.index_url }}" \
-            --sample-count "${{ inputs.sample_count }}"
+            --index-url "$INDEX_URL" \
+            --sample-count "$SAMPLE_COUNT"
 
       - name: Pip Dry-Run 依赖解析与下载链路校验
         run: |
           python3 scripts/pep658_check.py \
-            --index-url "${{ inputs.index_url }}" \
+            --index-url "$INDEX_URL" \
             --test-pip-dry-run
 
       - name: vLLM-Ascend 真实依赖安装模拟（全内网源 + 忽略本地磁盘缓存）
-        if: ${{ inputs.simulate_vllm_install != 'false' }}
+        if: ${{ (inputs.simulate_vllm_install || 'true') != 'false' }}
         run: |
           python3 scripts/test_vllm_ascend_install.py
 
