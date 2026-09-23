@@ -9,8 +9,8 @@ name: e2e-scan-pytorch-metadata
 #   4. 各集群代理缓存命中与全量无损回放
 on:
   schedule:
-    # 每天 UTC 00:00（北京时间 08:00）全量检查 CPU wheel 缓存。
-    - cron: "0 0 * * *"
+    # 每天 UTC 21:00（北京时间 05:00，凌晨错峰）全量检查 CPU wheel 缓存。
+    - cron: "0 21 * * *"
   workflow_dispatch:
     inputs:
       cluster:
