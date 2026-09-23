@@ -13,8 +13,8 @@ name: e2e-feature-crates-cache
 
 on:
   schedule:
-    # 每天 UTC 04:00（北京时间 12:00）全集群 crates.io 缓存（Port 8085）验证
-    - cron: "0 4 * * *"
+    # 每天 UTC 19:30（北京时间 03:30，凌晨错峰）全集群 crates.io 缓存（Port 8085）验证
+    - cron: "30 19 * * *"
   workflow_dispatch:
     inputs:
       cluster:

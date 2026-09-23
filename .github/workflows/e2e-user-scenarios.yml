@@ -11,8 +11,8 @@ name: e2e-user-scenarios
 
 on:
   schedule:
-    # 每天 UTC 05:00（北京时间 13:00）全集群端到端全链路真实用户场景测试
-    - cron: "0 5 * * *"
+    # 每天 UTC 20:30（北京时间 04:30，凌晨错峰）全集群端到端全链路真实用户场景测试
+    - cron: "30 20 * * *"
   workflow_dispatch:
     inputs:
       cluster:

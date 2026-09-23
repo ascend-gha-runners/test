@@ -11,8 +11,8 @@ name: e2e-feature-apt-cache
 
 on:
   schedule:
-    # 每天 UTC 02:30（北京时间 10:30）全集群 APT 缓存（Port 8081）验证
-    - cron: "30 2 * * *"
+    # 每天 UTC 18:00（北京时间 02:00，凌晨错峰）全集群 APT 缓存（Port 8081）验证
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       cluster:

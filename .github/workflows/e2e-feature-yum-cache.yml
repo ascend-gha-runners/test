@@ -12,8 +12,8 @@ name: e2e-feature-yum-cache
 
 on:
   schedule:
-    # 每天 UTC 03:30（北京时间 11:30）全集群 YUM/DNF 缓存（Port 8083）验证
-    - cron: "30 3 * * *"
+    # 每天 UTC 19:00（北京时间 03:00，凌晨错峰）全集群 YUM/DNF 缓存（Port 8083）验证
+    - cron: "0 19 * * *"
   workflow_dispatch:
     inputs:
       cluster:

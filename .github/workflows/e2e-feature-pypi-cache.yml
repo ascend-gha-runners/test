@@ -14,8 +14,8 @@ name: e2e-feature-pypi-cache
 
 on:
   schedule:
-    # 每天 UTC 02:00（北京时间 10:00）全集群 PyPI 缓存与 PyTorch Wheel 验证
-    - cron: "0 2 * * *"
+    # 每天 UTC 17:30（北京时间 01:30，凌晨错峰）全集群 PyPI 缓存与 PyTorch Wheel 验证
+    - cron: "30 17 * * *"
   workflow_dispatch:
     inputs:
       cluster:

@@ -12,8 +12,8 @@ name: e2e-feature-rustup-cache
 
 on:
   schedule:
-    # 每天 UTC 03:00（北京时间 11:00）全集群 Rust/rustup 缓存（Port 8082）验证
-    - cron: "0 3 * * *"
+    # 每天 UTC 18:30（北京时间 02:30，凌晨错峰）全集群 Rust/rustup 缓存（Port 8082）验证
+    - cron: "30 18 * * *"
   workflow_dispatch:
     inputs:
       cluster:

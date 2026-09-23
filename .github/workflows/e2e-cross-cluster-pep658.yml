@@ -5,8 +5,8 @@ name: e2e-cross-cluster-pep658
 # 3. 核心专项：PyTorch Simple Index PEP 658 Metadata Checksum 完整性校验（针对 pytorch/pytorch#197552）
 on:
   schedule:
-    # 每天 UTC 04:30（北京时间 12:30）全集群 PyTorch PEP 658 元数据抽检与端到端链路验证
-    - cron: "30 4 * * *"
+    # 每天 UTC 20:00（北京时间 04:00，凌晨错峰）全集群 PyTorch PEP 658 元数据抽检与端到端链路验证
+    - cron: "0 20 * * *"
   workflow_dispatch:
     inputs:
       cluster:
