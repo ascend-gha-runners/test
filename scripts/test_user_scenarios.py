@@ -466,7 +466,17 @@ def parse_args():
     parser.add_argument(
         "--scenarios",
         default="all",
-        help="Comma-separated scenarios: os_pkg,pypi_uv,rust,rust_403,git, or all",
+        help="Comma-separated scenarios: pypi,apt,yum,rustup,crates,os_pkg,pypi_uv,rust,rust_403,git, or all",
+    )
+    parser.add_argument(
+        "--case",
+        default="",
+        help="Run a specific test case by ID (e.g. TC-FEAT-PYPI, TC-FEAT-APT, TC-FEAT-RUSTUP, TC-FEAT-YUM, TC-FEAT-CRATES)",
+    )
+    parser.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="List standardized test case specifications from .github/config/test_cases.json",
     )
     parser.add_argument(
         "--strict-403",
@@ -479,14 +489,52 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.list_cases:
+        import json
+        config_path = os.path.join(os.path.dirname(__file__), "..", ".github", "config", "test_cases.json")
+        if os.path.exists(config_path):
+            with open(config_path) as fp:
+                data = json.load(fp)
+            print(f"=== Registered Test Cases ({len(data.get('test_cases', []))}) ===\n")
+            for tc in data.get("test_cases", []):
+                print(f"[{tc['id']}] {tc['name']}")
+                print(f"  • Feature Doc: {tc.get('feature_doc', 'N/A')}")
+                print(f"  • Workflow:    {tc.get('workflow', 'N/A')}")
+                print(f"  • Clients:     {', '.join(tc.get('client', []))}")
+                print(f"  • Scenario:    {tc.get('engine_scenario', 'N/A')}")
+                print()
+            sys.exit(0)
+        else:
+            log(f"Config file not found at {config_path}", "ERROR")
+            sys.exit(1)
+
     cache_host = args.cache_host
     arch = platform.machine()
     log(f"Starting Realistic End-User CI Test Suite on {arch} ({detect_os()})...")
     log(f"Cache Host: {cache_host}")
     log(f"Strict 403 Fallback Enforcement: {args.strict_403}")
 
-    selected_scenarios = [s.strip() for s in args.scenarios.split(",")]
-    run_all = "all" in selected_scenarios
+    case_to_scenario = {
+        "TC-FEAT-PYPI": "pypi",
+        "TC-FEAT-APT": "apt",
+        "TC-FEAT-RUSTUP": "rustup",
+        "TC-FEAT-YUM": "yum",
+        "TC-FEAT-CRATES": "crates",
+        "TC-E2E-USER-SCENARIOS": "all",
+    }
+    if args.case:
+        matched = case_to_scenario.get(args.case.strip())
+        if matched:
+            selected_scenarios = [matched]
+            run_all = matched == "all"
+            log(f"Mapped case ID '{args.case}' -> scenario '{matched}'")
+        else:
+            log(f"Unknown case ID: '{args.case}'. Available: {list(case_to_scenario.keys())}", "ERROR")
+            sys.exit(1)
+    else:
+        selected_scenarios = [s.strip() for s in args.scenarios.split(",")]
+        run_all = "all" in selected_scenarios
 
     failures = []
     rust_env = None
