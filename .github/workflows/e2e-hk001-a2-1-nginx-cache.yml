@@ -1,0 +1,257 @@
+name: e2e-hk001-a2-1-nginx-cache
+# hk-001 组织级 A2 整卡 1 卡 runner（gy-001 / wlcb-001）的 nginx-pypi-cache(-new)
+# 真实客户端场景 E2E：用真实包管理器/工具链取包，而不是 curl 探测替身。
+#
+# 覆盖 -new 生产布局的全部生态（无 crates:8085）：
+#   :80   PyPI (pip) / PyTorch wheels (/whl, pip)
+#   :8081 Deb  (apt, Ubuntu 容器)
+#   :8082 Rust (rustup 工具链)
+#   :8083 Yum  (dnf, openEuler 容器)
+#   :8084 Go   (golang + GOPROXY)
+#
+# 断言分级（见 AGENTS）：
+#   硬断言：gy001 上真实安装成功 / 二进制可执行 / import 成功
+#   降级：wlcb001 的 cache 回源不稳定（nginx connect 110 超时，见 error log：
+#         "connect() failed (110: Connection timed out) while connecting to upstream"），
+#         回源类场景失败时 WARN 跳过（degrade=true），不阻塞；本地断言两边都硬。
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '选择目标 runner'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - gy001
+          - wlcb001
+  pull_request:
+    paths:
+      - '.github/workflows/e2e-hk001-a2-1-nginx-cache.yml'
+
+jobs:
+  matrix-setup:
+    name: 解析目标 runner
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: 生成 matrix（dispatch 可按 target 过滤；PR 事件跑全部）
+        id: set
+        run: |
+          target='${{ inputs.target }}'
+          if [ -z "$target" ]; then target='all'; fi
+          if [ "$target" = "gy001" ]; then
+            matrix='{"include":[{"target":"gy001","degrade":"false"}]}'
+          elif [ "$target" = "wlcb001" ]; then
+            matrix='{"include":[{"target":"wlcb001","degrade":"true"}]}'
+          else
+            matrix='{"include":[{"target":"gy001","degrade":"false"},{"target":"wlcb001","degrade":"true"}]}'
+          fi
+          echo "matrix=${matrix}"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+  cache-customer:
+    name: "${{ matrix.target }} / cache-customer"
+    needs: matrix-setup
+    runs-on: linux-aarch64-a2-1-${{ matrix.target }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CACHE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+    steps:
+      - name: 环境信息
+        run: |
+          echo "target=${{ matrix.target }} arch=$(uname -m)"
+          grep PRETTY_NAME /etc/os-release || true
+          python3 --version
+          python3 -m pip --version
+          command -v dnf || command -v yum || echo "no dnf/yum"
+
+      - name: PyPI 真实安装（pip，:80）
+        run: |
+          python3 -m pip config set global.index-url "http://$CACHE_HOST/pypi/simple"
+          python3 -m pip config set global.trusted-host "$CACHE_HOST"
+          python3 -m pip config set global.no-cache-dir true
+          set +e
+          python3 -m pip install --no-cache-dir --retries 5 --timeout 60 requests
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [PyPI] pip install 失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [PyPI] pip install requests"; exit 1
+          fi
+          python3 -c "import requests; print('PASS: [PyPI] requests', requests.__version__)"
+
+      - name: PyTorch /whl 真实安装（pip，:80）
+        run: |
+          WHL="http://$CACHE_HOST/whl/cpu"
+          # 先短探测 /whl 索引可达性，避免 wlcb 上被 nginx 130s connect 超时拖死
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$WHL/torch/") || code=000
+          echo "/whl/cpu/torch/ probe: $code"
+          if [ "$code" != "200" ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [PyTorch] $WHL/torch/ 不可达 (code=$code)，${{ matrix.target }} 降级跳过（cache 回源超时）"
+              exit 0
+            fi
+            echo "FAIL: [PyTorch] 缓存 /whl 索引不可达 (code=$code)"; exit 1
+          fi
+          set +e
+          python3 -m pip install --no-cache-dir --retries 3 --timeout 90 \
+            --index-url "$WHL" \
+            --extra-index-url "http://$CACHE_HOST/pypi/simple" \
+            --trusted-host "$CACHE_HOST" torch
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [PyTorch] pip install torch 失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [PyTorch] pip install torch"; exit 1
+          fi
+          python3 -c "import torch; print('PASS: [PyTorch] torch', torch.__version__)"
+
+      - name: Yum / openEuler 真实安装（dnf，:8083）
+        run: |
+          if ! command -v dnf >/dev/null 2>&1 && ! command -v yum >/dev/null 2>&1; then
+            echo "WARN: [Yum] 容器无 dnf/yum，跳过"; exit 0
+          fi
+          sed -i "s|https://repo.openeuler.org|http://$CACHE_HOST:8083|g" /etc/yum.repos.d/*.repo 2>/dev/null || true
+          sed -Ei "s@https?://[^/]+/(openeuler|centos|fedora)@http://$CACHE_HOST:8083/\1@g" /etc/yum.repos.d/*.repo 2>/dev/null || true
+          grep -E "$CACHE_HOST:8083" /etc/yum.repos.d/*.repo | head -n 5 || true
+          set +e
+          (dnf clean all || yum clean all) >/dev/null 2>&1
+          (dnf makecache || yum makecache) >/dev/null 2>&1
+          (dnf install -y git zstd || yum install -y git zstd)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [Yum] dnf install 失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [Yum] dnf install git zstd"; exit 1
+          fi
+          git --version; zstd --version
+          echo "PASS: [Yum] openEuler 经 :8083 安装成功"
+
+      - name: Rust 工具链真实安装（rustup，:8082）
+        run: |
+          export RUSTUP_DIST_SERVER="http://$CACHE_HOST:8082/rustup"
+          export RUSTUP_UPDATE_ROOT="http://$CACHE_HOST:8082/rustup/rustup"
+          export CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
+          set +e
+          curl -fsSL -m 60 "$RUSTUP_UPDATE_ROOT/rustup-init.sh" -o /tmp/rustup-init.sh
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal --no-modify-path
+            rc=$?
+          fi
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [Rust] rustup 安装失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [Rust] rustup 工具链安装"; exit 1
+          fi
+          /root/.cargo/bin/rustc --version
+          /root/.cargo/bin/cargo --version
+          printf 'fn main(){println!("PASS: [Rust] compiled & ran via :8082");}\n' > /tmp/h.rs
+          /root/.cargo/bin/rustc /tmp/h.rs -o /tmp/h && /tmp/h
+
+      - name: Go 真实构建（golang + GOPROXY，:8084）
+        run: |
+          set +e
+          if ! command -v go >/dev/null 2>&1; then
+            echo "安装 golang（经 :8083 yum 缓存）"
+            (dnf install -y golang || yum install -y golang)
+          fi
+          set -e
+          if ! command -v go >/dev/null 2>&1; then
+            echo "WARN: [Go] 容器无 golang 且仓库未提供，跳过"; exit 0
+          fi
+          go version
+          export GOPROXY="http://$CACHE_HOST:8084" GOSUMDB=off GOFLAGS=-mod=mod
+          work=/tmp/go-e2e; rm -rf "$work"; mkdir -p "$work"; cd "$work"
+          set +e
+          go mod init e2e.local/nginxcache >/dev/null 2>&1
+          go get github.com/google/uuid@v1.6.0
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [Go] go get 失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [Go] go get github.com/google/uuid"; exit 1
+          fi
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+          	"fmt"
+
+          	"github.com/google/uuid"
+          )
+
+          func main() {
+          	fmt.Printf("PASS: [Go] built & ran via :8084 uuid=%s\n", uuid.NewString())
+          }
+          EOF
+          go build ./...
+          go run .
+
+  deb-customer:
+    name: "${{ matrix.target }} / deb-customer"
+    needs: matrix-setup
+    runs-on: linux-aarch64-a2-1-${{ matrix.target }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CACHE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+    steps:
+      - name: 环境信息
+        run: |
+          echo "target=${{ matrix.target }} arch=$(uname -m)"
+          grep PRETTY_NAME /etc/os-release || true
+
+      - name: Deb 真实安装（apt-get，:8081）
+        run: |
+          sed -Ei "s@(ports|archive).ubuntu.com@$CACHE_HOST:8081@g" /etc/apt/sources.list
+          if [ -d /etc/apt/sources.list.d ]; then
+            sed -Ei "s@(ports|archive).ubuntu.com@$CACHE_HOST:8081@g" /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          fi
+          grep -E "$CACHE_HOST:8081" /etc/apt/sources.list | head -n 5 || true
+          set +e
+          apt-get update -y
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            apt-get install -y --no-install-recommends git zstd
+            rc=$?
+          fi
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ "${{ matrix.degrade }}" = "true" ]; then
+              echo "WARN: [Deb] apt-get 失败（${{ matrix.target }} cache 回源不稳定），降级跳过"
+              exit 0
+            fi
+            echo "FAIL: [Deb] apt-get update/install"; exit 1
+          fi
+          git --version; zstd --version
+          echo "PASS: [Deb] Ubuntu 经 :8081 安装成功"

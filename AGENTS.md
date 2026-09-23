@@ -91,8 +91,16 @@ gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 # 烟测与全链路用例
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
+
+# hk-001 A2(gy-001/wlcb-001) 的 nginx 真实客户场景（同一份 steps 用 matrix 跑两个 runner）
+gh workflow run e2e-hk001-a2-1-nginx-cache.yml --repo ascend-gha-runners/test -f target=all
 gh run watch <run-id> --repo ascend-gha-runners/test
 ```
+
+> 说明：`e2e-hk001-a2-1-nginx-cache.yml` 用 `matrix`（gy001/wlcb001）复用同一份 steps。
+> `wlcb001` 的 cache 回源不稳定（nginx error log `connect() failed (110: Connection
+> timed out) while connecting to upstream`），matrix 项设 `degrade=true`：回源类场景
+> 失败时 WARN 跳过（不阻塞），本地断言仍硬断言；`gy001` 一律硬断言。
 
 ## 历史 workflow
 `test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期
