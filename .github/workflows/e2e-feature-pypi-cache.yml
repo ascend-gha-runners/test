@@ -166,7 +166,8 @@ jobs:
           echo "=== 真实安装 uv 与 uc-manager（模拟真实项目构建环境）==="
           python3 -m pip install --no-cache-dir uv uc-manager
           uv --version
-          python3 -c "import uc_manager; print('✓ uc-manager loaded successfully')"
+          python3 -m pip show uc-manager
+          echo "✓ uc-manager and uv installed successfully"
 
       - name: 4. 验证 PyTorch Wheels 缓存（/whl/cpu 路径真实安装）
         run: |

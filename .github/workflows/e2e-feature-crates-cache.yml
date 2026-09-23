@@ -143,6 +143,9 @@ jobs:
           fi
 
       - name: 2. 准备 Rust 工具链
+        env:
+          RUSTUP_DIST_SERVER: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup
+          RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup/rustup
         run: |
           if ! command -v cargo >/dev/null 2>&1; then
             echo "=== 安装 Rust 工具链以执行真实 cargo 构建 ==="

@@ -173,7 +173,7 @@ cargo --version
 
 #### 4. 判定标准
 - **硬断言**：安装器退出码 0；`rustc --version` 与 `cargo --version` 成功输出有效语义版本号；
-- **软断言**：`rustc -e 'fn main() { println!("ok"); }' -o /tmp/t && /tmp/t` 输出成功；
+- **软断言**：`echo 'fn main() { println!("ok"); }' | rustc - -o /tmp/t && /tmp/t` 输出成功；
 - **探针**：`X-Rustup-Cache` 缓存状态头。
 
 ---
