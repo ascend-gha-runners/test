@@ -1,6 +1,8 @@
 name: e2e-hk001-a2-1-smoke
 # hk-001 组织级 A2 整卡 1 卡 runner（gy-001 / wlcb-001）端到端冒烟
-# 覆盖：label 调度 / aarch64 / NPU 卡数 / git-cdn / nginx-pypi-cache / 共享缓存挂载
+# 覆盖：label 调度 / aarch64 / NPU 卡数 / git-cdn / 共享缓存挂载
+#       + nginx-pypi-cache(-new) 全生态缓存：PyPI / PyTorch(/whl) / Deb(:8081)
+#         / Rust(:8082) / Yum(:8083) / Go(:8084)
 on:
   pull_request:
     branches: [main]
@@ -81,6 +83,100 @@ jobs:
           python -c "import six; print('six', six.__version__)"
           echo "PASS: 经缓存安装成功"
 
+      - name: nginx 缓存：PyTorch /whl 路由（本地空索引页）
+        run: |
+          WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
+          code=$(curl -s -o /tmp/whl-empty -w '%{http_code}' --max-time 30 \
+            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/")
+          echo "non-torch /whl index: $code"
+          [ "$code" = "200" ] || { echo "FAIL: /whl 非 torch 索引页非 200"; exit 1; }
+          grep -q 'pypi:repository-version' /tmp/whl-empty \
+            || { echo "FAIL: /whl 空索引页内容异常"; exit 1; }
+          echo "PASS: /whl 路由返回本地空 PEP503 页"
+
+      - name: nginx 缓存：PyTorch /whl 上游回源（信息项，依赖公网）
+        continue-on-error: true
+        run: |
+          WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
+          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 90 \
+            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/")
+          if [ "$code" != "200" ]; then
+            echo "WARN: torch 索引 $code（download.pytorch.org 不可达），跳过改写断言"
+            exit 0
+          fi
+          grep -q 'cache-service.nginx-pypi-cache.svc.cluster.local' /tmp/whl-torch \
+            || { echo "FAIL: torch 索引未改写回缓存域名"; exit 1; }
+          if grep -Eq 'https://download(-r2)?\.pytorch\.org' /tmp/whl-torch; then
+            echo "FAIL: torch 索引泄漏上游 origin"; exit 1
+          fi
+          echo "PASS: torch 索引链接改写回缓存域名"
+
+      - name: nginx 缓存：Deb（:8081）
+        run: |
+          DEB=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+          code=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
+            --max-time 60 "$DEB/debian/dists/bookworm/Release")
+          [ "$code" = "200" ] || { echo "FAIL: Debian Release code=$code"; exit 1; }
+          status=$(curl -sI --retry 3 --retry-delay 3 --max-time 60 \
+            "$DEB/debian/dists/bookworm/Release" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          [ -n "$status" ] || { echo "FAIL: 无 X-Cache-Status（未经过 deb 缓存）"; exit 1; }
+          ucode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
+            --max-time 60 "$DEB/ubuntu/dists/jammy/Release")
+          [ "$ucode" = "200" ] || { echo "FAIL: Ubuntu Release code=$ucode"; exit 1; }
+          deb="$DEB/debian/pool/main/h/hello/hello_2.10-2_amd64.deb"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          echo "Debian Release X-Cache-Status=$status, .deb $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: .deb 无 X-Cache-Status"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: .deb MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Deb（Debian/Ubuntu）缓存链路正常"
+
+      - name: nginx 缓存：Rust（:8082）
+        run: |
+          RUST=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082
+          u="$RUST/dist/channel-rust-stable.toml"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-rustup-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-rustup-cache | tr -d '\r' | awk '{print $2}')
+          echo "rustup manifest $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Rustup-Cache（未经过 rust 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: rust MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Rust rustup 缓存链路正常"
+
+      - name: nginx 缓存：Yum / openEuler（:8083）
+        run: |
+          YUM=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
+          u="$YUM/openEuler-22.03-LTS-SP4/OS/aarch64/repodata/repomd.xml"
+          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u")
+          [ "$code" = "200" ] || { echo "FAIL: repomd.xml code=$code"; exit 1; }
+          grep -q '<repomd' /tmp/repomd || { echo "FAIL: repomd 内容异常"; exit 1; }
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
+          echo "repomd.xml $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Yum-Cache（未经过 yum 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: yum MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Yum/openEuler 缓存链路正常"
+
+      - name: nginx 缓存：Go（:8084）
+        run: |
+          GO=http://cache-service.nginx-pypi-cache.svc.cluster.local:8084
+          u="$GO/github.com/gin-gonic/gin/@v/list"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-go-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-go-cache | tr -d '\r' | awk '{print $2}')
+          echo "go @v/list $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Go-Cache（未经过 go 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: go MISS 后未 HIT"; exit 1; }
+          fi
+          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info")
+          [ "$icode" = "200" ] || { echo "FAIL: go .info code=$icode"; exit 1; }
+          echo "PASS: Go goproxy 缓存链路正常"
+
       - name: 共享缓存挂载（/root/.cache）
         run: |
           [ -d /root/.cache ] || { echo "FAIL: /root/.cache 未挂载"; exit 1; }
@@ -152,6 +248,100 @@ jobs:
             || { echo "FAIL: pip install 失败"; exit 1; }
           python -c "import six; print('six', six.__version__)"
           echo "PASS: 经缓存安装成功"
+
+      - name: nginx 缓存：PyTorch /whl 路由（本地空索引页）
+        run: |
+          WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
+          code=$(curl -s -o /tmp/whl-empty -w '%{http_code}' --max-time 30 \
+            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/")
+          echo "non-torch /whl index: $code"
+          [ "$code" = "200" ] || { echo "FAIL: /whl 非 torch 索引页非 200"; exit 1; }
+          grep -q 'pypi:repository-version' /tmp/whl-empty \
+            || { echo "FAIL: /whl 空索引页内容异常"; exit 1; }
+          echo "PASS: /whl 路由返回本地空 PEP503 页"
+
+      - name: nginx 缓存：PyTorch /whl 上游回源（信息项，依赖公网）
+        continue-on-error: true
+        run: |
+          WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
+          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 90 \
+            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/")
+          if [ "$code" != "200" ]; then
+            echo "WARN: torch 索引 $code（download.pytorch.org 不可达），跳过改写断言"
+            exit 0
+          fi
+          grep -q 'cache-service.nginx-pypi-cache.svc.cluster.local' /tmp/whl-torch \
+            || { echo "FAIL: torch 索引未改写回缓存域名"; exit 1; }
+          if grep -Eq 'https://download(-r2)?\.pytorch\.org' /tmp/whl-torch; then
+            echo "FAIL: torch 索引泄漏上游 origin"; exit 1
+          fi
+          echo "PASS: torch 索引链接改写回缓存域名"
+
+      - name: nginx 缓存：Deb（:8081）
+        run: |
+          DEB=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+          code=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
+            --max-time 60 "$DEB/debian/dists/bookworm/Release")
+          [ "$code" = "200" ] || { echo "FAIL: Debian Release code=$code"; exit 1; }
+          status=$(curl -sI --retry 3 --retry-delay 3 --max-time 60 \
+            "$DEB/debian/dists/bookworm/Release" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          [ -n "$status" ] || { echo "FAIL: 无 X-Cache-Status（未经过 deb 缓存）"; exit 1; }
+          ucode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
+            --max-time 60 "$DEB/ubuntu/dists/jammy/Release")
+          [ "$ucode" = "200" ] || { echo "FAIL: Ubuntu Release code=$ucode"; exit 1; }
+          deb="$DEB/debian/pool/main/h/hello/hello_2.10-2_amd64.deb"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
+          echo "Debian Release X-Cache-Status=$status, .deb $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: .deb 无 X-Cache-Status"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: .deb MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Deb（Debian/Ubuntu）缓存链路正常"
+
+      - name: nginx 缓存：Rust（:8082）
+        run: |
+          RUST=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082
+          u="$RUST/dist/channel-rust-stable.toml"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-rustup-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-rustup-cache | tr -d '\r' | awk '{print $2}')
+          echo "rustup manifest $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Rustup-Cache（未经过 rust 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: rust MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Rust rustup 缓存链路正常"
+
+      - name: nginx 缓存：Yum / openEuler（:8083）
+        run: |
+          YUM=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
+          u="$YUM/openEuler-22.03-LTS-SP4/OS/aarch64/repodata/repomd.xml"
+          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u")
+          [ "$code" = "200" ] || { echo "FAIL: repomd.xml code=$code"; exit 1; }
+          grep -q '<repomd' /tmp/repomd || { echo "FAIL: repomd 内容异常"; exit 1; }
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
+          echo "repomd.xml $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Yum-Cache（未经过 yum 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: yum MISS 后未 HIT"; exit 1; }
+          fi
+          echo "PASS: Yum/openEuler 缓存链路正常"
+
+      - name: nginx 缓存：Go（:8084）
+        run: |
+          GO=http://cache-service.nginx-pypi-cache.svc.cluster.local:8084
+          u="$GO/github.com/gin-gonic/gin/@v/list"
+          h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-go-cache | tr -d '\r' | awk '{print $2}')
+          h2=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-go-cache | tr -d '\r' | awk '{print $2}')
+          echo "go @v/list $h1 -> $h2"
+          [ -n "$h1" ] || { echo "FAIL: 无 X-Go-Cache（未经过 go 缓存）"; exit 1; }
+          if [ "$h1" = "MISS" ]; then
+            [ "$h2" = "HIT" ] || { echo "FAIL: go MISS 后未 HIT"; exit 1; }
+          fi
+          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info")
+          [ "$icode" = "200" ] || { echo "FAIL: go .info code=$icode"; exit 1; }
+          echo "PASS: Go goproxy 缓存链路正常"
 
       - name: 共享缓存挂载（/root/.cache）
         run: |
