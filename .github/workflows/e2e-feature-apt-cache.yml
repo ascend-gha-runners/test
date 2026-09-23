@@ -1,19 +1,19 @@
-name: e2e-user-scenarios
-# 真实用户场景 E2E 跨集群测试流水线
-# 参考 vllm-project/vllm-ascend/.github/workflows/ 真实 CI 工作流与 Dockerfile 编写：
-# 1. 严格禁止单纯 curl 探测，所有测试用例均为实际工具链、包管理器、编译器的真实执行；
-# 2. 覆盖 vLLM-Ascend CI 核心全链路：
-#    - OS 包管理器：openEuler DNF/YUM (8083) / Ubuntu APT (8081)
-#    - Python 真实构建与安装：pip + uv (--no-cache-dir, unsafe-best-match, triton-ascend, torch)
-#    - Rust 工具链与 Crates 编译：rustup-init (8082) + cargo sparse index (8085) + 真实 crate 编译运行
-#    - Git 代理链路：gh-proxy.test.osinfra.cn 真实 git clone 检出
-# 3. 跨集群驱动：基于 .github/config/runners.json 支持全部 13 个集群 Runner 矩阵执行
+name: e2e-feature-apt-cache
+# 验证特性：APT 缓存服务（Port 8081）
+# 文档来源：https://ascend-gha-runners.github.io/docs/feature/#apt-cache-port-8081
+# 真实项目使用方式（参考 vllm-project/vllm-ascend CI 镜像构建与系统依赖安装）：
+# 1. 配置 APT 镜像缓存源：
+#    sed -Ei 's@(ports|archive).ubuntu.com@cache-service...:8081@g' /etc/apt/sources.list
+# 2. 真实系统级包更新与安装：
+#    apt-get update -y
+#    apt-get install -y --no-install-recommends git zstd gcc cmake
+# 3. 校验已安装工具链执行与版本
 
 on:
   workflow_dispatch:
     inputs:
       cluster:
-        description: "目标集群 (all / gy-001 / wlcb / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
+        description: "目标集群 (all / gy-001 / wlcb-001 / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
         required: false
         default: "all"
         type: choice
@@ -41,18 +41,8 @@ on:
           - all
           - cpu
           - npu
-      scenarios:
-        description: "选择测试场景 (all / pypi,apt,yum,rustup,crates,os_pkg,pypi_uv,rust,rust_403,git)"
-        required: false
-        default: "all"
-        type: string
-      strict_403:
-        description: "是否严格阻断 403 失败 (false: 仅检测并预警 PR #1722 缺失; true: 严格断言 403 回退成功)"
-        required: false
-        default: "false"
-        type: string
       cache_host:
-        description: "集群内网 nginx-pypi-cache 域名"
+        description: "集群内网 nginx-pypi-cache 服务域名"
         required: false
         default: "cache-service.nginx-pypi-cache.svc.cluster.local"
         type: string
@@ -107,7 +97,7 @@ jobs:
               gh_out.write(f"count={len(selected)}\n")
           '
 
-  run-user-scenarios:
+  run-apt-cache-e2e:
     name: "${{ matrix.name }} [${{ matrix.cluster }}]"
     needs: matrix-setup
     runs-on: ${{ matrix.labels }}
@@ -116,33 +106,49 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CACHE_HOST: ${{ inputs.cache_host }}
     steps:
-      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
-        run: |
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
-
-      - name: 检出测试仓库
-        uses: actions/checkout@v4
-
-      - name: 基础环境信息
+      - name: 基础环境与操作系统诊断
         run: |
           echo "=== 节点信息 ==="
           echo "Cluster: ${{ matrix.cluster }}"
           echo "Runner:  ${{ matrix.name }}"
           echo "Arch:    $(uname -m)"
-          echo "OS:      $(cat /etc/os-release | grep PRETTY_NAME || uname -s)"
-          python3 --version
-          python3 -m pip --version
+          cat /etc/os-release | grep PRETTY_NAME || true
 
-      - name: 执行真实用户场景测试套件
+      - name: 1. 探测内网 APT 缓存端口（8081）连通性
         run: |
-          STRICT_FLAG=""
-          if [ "${{ inputs.strict_403 }}" = "true" ]; then
-            STRICT_FLAG="--strict-403"
-          fi
+          echo "=== 探测 APT 缓存服务 (8081) ==="
+          curl -sI --connect-timeout 5 "http://${{ inputs.cache_host }}:8081" || echo "Note: Port 8081 root index may close or redirect, proceeding to apt repository test"
 
-          python3 scripts/test_user_scenarios.py \
-            --cache-host "${{ inputs.cache_host }}" \
-            --scenarios "${{ inputs.scenarios }}" \
-            ${STRICT_FLAG}
+      - name: 2. 按照文档与 vLLM-Ascend 规范配置 APT 源
+        run: |
+          echo "=== 替换 /etc/apt/sources.list 指向 8081 缓存 ==="
+          sed -Ei "s@(ports|archive).ubuntu.com@${{ inputs.cache_host }}:8081@g" /etc/apt/sources.list
+          if [ -d /etc/apt/sources.list.d ]; then
+            sed -Ei "s@(ports|archive).ubuntu.com@${{ inputs.cache_host }}:8081@g" /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          fi
+          echo "=== sources.list 校验 ==="
+          grep -E "${{ inputs.cache_host }}:8081" /etc/apt/sources.list | head -n 10
+
+      - name: 3. 经内网缓存真实执行 apt-get update
+        run: |
+          echo "=== 执行 apt-get update -y ==="
+          apt-get update -y
+
+      - name: 4. 经内网缓存真实安装核心编译工具链（vLLM-Ascend 依赖）
+        run: |
+          echo "=== 安装构建依赖 (git, zstd, gcc, cmake) ==="
+          apt-get install -y --no-install-recommends git zstd gcc cmake
+
+      - name: 5. 验证已安装工具链及二进制可执行
+        run: |
+          echo "=== 验证工具链执行与版本 ==="
+          git --version
+          zstd --version
+          gcc --version
+          cmake --version
+          echo "✓ APT Cache 8081 feature verified successfully on ${{ matrix.cluster }} (${{ matrix.name }})!"

@@ -70,37 +70,55 @@ def detect_os():
 # ==============================================================================
 # Scenario 1: OS Package Manager (APT on Ubuntu, YUM/DNF on openEuler)
 # ==============================================================================
+def test_apt_package_manager(cache_host: str):
+    log(f"=== APT Package Manager Verification (Port 8081) ===")
+    log(f"Configuring Ubuntu APT mirror to http://{cache_host}:8081 ...")
+    # Exact pattern from vllm-ascend:
+    # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+    run_cmd(
+        f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list",
+        desc="Rewrite /etc/apt/sources.list to port 8081",
+    )
+    if os.path.exists("/etc/apt/sources.list.d"):
+        run_cmd(
+            f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list.d/*.list 2>/dev/null || true",
+            desc="Rewrite /etc/apt/sources.list.d to port 8081",
+        )
+    run_cmd("apt-get update -y", desc="apt-get update via 8081")
+    run_cmd("apt-get install -y --no-install-recommends git zstd gcc cmake", desc="apt-get install dependencies via 8081")
+    run_cmd(["git", "--version"], desc="Verify installed git binary")
+    run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
+    log("[PASS] Ubuntu APT package installation via port 8081 succeeded.")
+
+
+def test_yum_package_manager(cache_host: str):
+    log(f"=== YUM/DNF Package Manager Verification (Port 8083) ===")
+    log(f"Configuring openEuler YUM/DNF mirror to http://{cache_host}:8083 ...")
+    # Exact pattern from vllm-ascend _build_csrc_cache.yaml:
+    # sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service...:8083/\1@g' /etc/yum.repos.d/*.repo
+    run_cmd(
+        f"sed -i 's|https://repo.openeuler.org|http://{cache_host}:8083|g' /etc/yum.repos.d/*.repo || true",
+        desc="Rewrite https://repo.openeuler.org to port 8083",
+    )
+    run_cmd(
+        f"sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://{cache_host}:8083/\\1@g' /etc/yum.repos.d/*.repo || true",
+        desc="Rewrite /etc/yum.repos.d/*.repo to port 8083",
+    )
+    run_cmd("dnf clean all || yum clean all", desc="clean all")
+    run_cmd("dnf makecache || yum makecache", desc="makecache via 8083")
+    run_cmd("dnf install -y git zstd || yum install -y git zstd", desc="install git zstd via 8083")
+    run_cmd(["git", "--version"], desc="Verify installed git binary")
+    run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
+    log("[PASS] openEuler YUM/DNF package installation via port 8083 succeeded.")
+
+
 def test_os_package_manager(cache_host: str):
     os_type = detect_os()
     log(f"=== Scenario 1: OS Package Manager Verification (Detected: {os_type}) ===")
-
     if os_type == "ubuntu":
-        log(f"Configuring Ubuntu APT mirror to http://{cache_host}:8081 ...")
-        # Exact pattern from vllm-ascend:
-        # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-        run_cmd(
-            f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list",
-            desc="Rewrite /etc/apt/sources.list to port 8081",
-        )
-        run_cmd("apt-get update -y", desc="apt-get update via 8081")
-        run_cmd("apt-get install -y --no-install-recommends zstd", desc="apt-get install zstd via 8081")
-        run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
-        log("[PASS] Ubuntu APT package installation via port 8081 succeeded.")
-
+        test_apt_package_manager(cache_host)
     elif os_type == "openeuler":
-        log(f"Configuring openEuler YUM/DNF mirror to http://{cache_host}:8083 ...")
-        # Exact pattern from vllm-ascend _build_csrc_cache.yaml:
-        # sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service...:8083/\1@g' /etc/yum.repos.d/*.repo
-        run_cmd(
-            f"sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://{cache_host}:8083/\\1@g' /etc/yum.repos.d/*.repo",
-            desc="Rewrite /etc/yum.repos.d/*.repo to port 8083",
-        )
-        run_cmd("dnf clean all", desc="dnf clean all")
-        run_cmd("dnf makecache", desc="dnf makecache via 8083")
-        run_cmd("dnf install -y zstd", desc="dnf install zstd via 8083")
-        run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
-        log("[PASS] openEuler YUM/DNF package installation via port 8083 succeeded.")
-
+        test_yum_package_manager(cache_host)
     else:
         log(f"[WARN] Unsupported OS type '{os_type}' for package manager test; skipping.", "WARN")
 
@@ -448,7 +466,17 @@ def parse_args():
     parser.add_argument(
         "--scenarios",
         default="all",
-        help="Comma-separated scenarios: os_pkg,pypi_uv,rust,rust_403,git, or all",
+        help="Comma-separated scenarios: pypi,apt,yum,rustup,crates,os_pkg,pypi_uv,rust,rust_403,git, or all",
+    )
+    parser.add_argument(
+        "--case",
+        default="",
+        help="Run a specific test case by ID (e.g. TC-FEAT-PYPI, TC-FEAT-APT, TC-FEAT-RUSTUP, TC-FEAT-YUM, TC-FEAT-CRATES)",
+    )
+    parser.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="List standardized test case specifications from .github/config/test_cases.json",
     )
     parser.add_argument(
         "--strict-403",
@@ -461,19 +489,73 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.list_cases:
+        import json
+        config_path = os.path.join(os.path.dirname(__file__), "..", ".github", "config", "test_cases.json")
+        if os.path.exists(config_path):
+            with open(config_path) as fp:
+                data = json.load(fp)
+            print(f"=== Registered Test Cases ({len(data.get('test_cases', []))}) ===\n")
+            for tc in data.get("test_cases", []):
+                print(f"[{tc['id']}] {tc['name']}")
+                print(f"  • Feature Doc: {tc.get('feature_doc', 'N/A')}")
+                print(f"  • Workflow:    {tc.get('workflow', 'N/A')}")
+                print(f"  • Clients:     {', '.join(tc.get('client', []))}")
+                print(f"  • Scenario:    {tc.get('engine_scenario', 'N/A')}")
+                print()
+            sys.exit(0)
+        else:
+            log(f"Config file not found at {config_path}", "ERROR")
+            sys.exit(1)
+
     cache_host = args.cache_host
     arch = platform.machine()
     log(f"Starting Realistic End-User CI Test Suite on {arch} ({detect_os()})...")
     log(f"Cache Host: {cache_host}")
     log(f"Strict 403 Fallback Enforcement: {args.strict_403}")
 
-    selected_scenarios = [s.strip() for s in args.scenarios.split(",")]
-    run_all = "all" in selected_scenarios
+    case_to_scenario = {
+        "TC-FEAT-PYPI": "pypi",
+        "TC-FEAT-APT": "apt",
+        "TC-FEAT-RUSTUP": "rustup",
+        "TC-FEAT-YUM": "yum",
+        "TC-FEAT-CRATES": "crates",
+        "TC-E2E-USER-SCENARIOS": "all",
+    }
+    if args.case:
+        matched = case_to_scenario.get(args.case.strip())
+        if matched:
+            selected_scenarios = [matched]
+            run_all = matched == "all"
+            log(f"Mapped case ID '{args.case}' -> scenario '{matched}'")
+        else:
+            log(f"Unknown case ID: '{args.case}'. Available: {list(case_to_scenario.keys())}", "ERROR")
+            sys.exit(1)
+    else:
+        selected_scenarios = [s.strip() for s in args.scenarios.split(",")]
+        run_all = "all" in selected_scenarios
 
     failures = []
     rust_env = None
 
-    # 1. OS Package Manager
+    # 1. APT Package Manager (explicit)
+    if "apt" in selected_scenarios:
+        try:
+            test_apt_package_manager(cache_host)
+        except Exception as e:
+            log(f"[FAIL] APT scenario failed: {e}", "ERROR")
+            failures.append("apt_package_manager")
+
+    # 1b. YUM / DNF Package Manager (explicit)
+    if "yum" in selected_scenarios:
+        try:
+            test_yum_package_manager(cache_host)
+        except Exception as e:
+            log(f"[FAIL] YUM scenario failed: {e}", "ERROR")
+            failures.append("yum_package_manager")
+
+    # 1c. OS Package Manager (auto-detect)
     if run_all or "os_pkg" in selected_scenarios:
         try:
             test_os_package_manager(cache_host)
@@ -482,7 +564,7 @@ def main():
             failures.append("os_package_manager")
 
     # 2. PyPI + UV
-    if run_all or "pypi_uv" in selected_scenarios:
+    if run_all or "pypi" in selected_scenarios or "pypi_uv" in selected_scenarios:
         try:
             test_pypi_and_uv_install(cache_host, args.triton_version, args.torch_version)
         except Exception as e:
@@ -490,7 +572,7 @@ def main():
             failures.append("pypi_uv")
 
     # 3. Rustup & Cargo (Standard Crate)
-    if run_all or "rust" in selected_scenarios or "rust_403" in selected_scenarios:
+    if run_all or "rust" in selected_scenarios or "rustup" in selected_scenarios or "crates" in selected_scenarios or "rust_403" in selected_scenarios:
         try:
             rust_env = test_rust_toolchain_and_cargo_build(cache_host)
         except Exception as e:

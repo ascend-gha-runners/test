@@ -63,9 +63,32 @@ container:
 - 上游功能合入但未同步到集群(ArgoCD 延迟/静态 checksum)时,e2e 走降级
   而非失败,等部署完成后自然转硬断言
 
+## 平台特性测试用例 (Platform Features)
+
+对应官方文档 [Platform Features](https://ascend-gha-runners.github.io/docs/feature/)，每个特性均有独立 E2E 测试用例，采用真实项目（如 `vllm-project/vllm-ascend`）的实际使用方式，并基于 `.github/config/runners.json` 支持全 13 集群矩阵调度：
+
+| 特性 | 工作流文件 | 代理端口 / 协议 | 覆盖范围 / 关键断言 |
+|---|---|---|---|
+| **PyPI Cache** | `e2e-feature-pypi-cache.yml` | Port 80 (HTTP) | pip/uv 真实安装、`/whl/cpu` 真实安装 PyTorch、404 回源至 pypi.org |
+| **APT Cache** | `e2e-feature-apt-cache.yml` | Port 8081 (HTTP) | Ubuntu 真实 `apt-get update` & 安装构建依赖 `git`/`zstd`/`gcc`/`cmake` |
+| **Rust / rustup** | `e2e-feature-rustup-cache.yml` | Port 8082 (HTTP) | rustup 极简稳定工具链真实下载安装与 `rustc`/`cargo` 可执行验证 |
+| **YUM / DNF Cache** | `e2e-feature-yum-cache.yml` | Port 8083 (HTTP) | openEuler 真实 `dnf/yum makecache` & 安装构建依赖 `git`/`zstd` |
+| **crates.io Cache**| `e2e-feature-crates-cache.yml` | Port 8085 (HTTP) | Cargo sparse 镜像、真实工程拉取 `anyhow` 依赖并编译执行、MISS→HIT 缓存头 |
+
 ## 运行方式
 
 ```bash
+# 平台各特性独立验证
+gh workflow run e2e-feature-pypi-cache.yml   --repo ascend-gha-runners/test
+gh workflow run e2e-feature-apt-cache.yml    --repo ascend-gha-runners/test
+gh workflow run e2e-feature-rustup-cache.yml --repo ascend-gha-runners/test
+gh workflow run e2e-feature-yum-cache.yml    --repo ascend-gha-runners/test
+gh workflow run e2e-feature-crates-cache.yml --repo ascend-gha-runners/test
+
+# 全集群 Runner 联通性与双标签验证
+gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
+
+# 烟测与全链路用例
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
 gh run watch <run-id> --repo ascend-gha-runners/test
@@ -74,3 +97,4 @@ gh run watch <run-id> --repo ascend-gha-runners/test
 ## 历史 workflow
 `test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期
 手工测试,保留作参考,新用例不要模仿其结构。
+

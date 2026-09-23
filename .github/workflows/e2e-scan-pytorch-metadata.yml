@@ -17,14 +17,19 @@ name: e2e-scan-pytorch-metadata
         type: choice
         options:
           - all
-          - gy-006
-          - hk-001
-          - cn12-001
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
           - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
           - aiframework
           - mind-third-ci
-          - gy-004
-          - gy-003
       runner_type:
         description: "选择 Runner 类型 (cpu / npu / all)"
         required: false
@@ -91,11 +96,17 @@ jobs:
 
           selected = []
           for r in runners:
-              if target_cluster != "all" and r.get("cluster") != target_cluster:
-                  continue
+              if target_cluster != "all":
+                  if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      continue
               if target_type != "all" and r.get("type") != target_type:
                   continue
               selected.append(r)
+
+          if not selected and target_cluster != "all":
+              for r in runners:
+                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      selected.append(r)
 
           if not selected:
               print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)

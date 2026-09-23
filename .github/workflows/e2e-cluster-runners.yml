@@ -1,0 +1,148 @@
+name: e2e-cluster-runners
+# 全集群组织级 Runner 联通性与调度验证流水线
+# 验证所有 13 个集群通过 [型号, 区域] 双标签正确调度并执行作业
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all / gy-001 / wlcb / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      runner_type:
+        description: "Runner 类型 (all / cpu / npu)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cpu
+          - npu
+      model:
+        description: "芯片型号 (all / a2 / a3 / 310p / a5 / cpu)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - a2
+          - a3
+          - 310p
+          - a5
+          - cpu
+
+jobs:
+  matrix-setup:
+    name: 解析集群 Runner 矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+          target_model = "${{ inputs.model }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all" and r.get("cluster") != target_cluster:
+                  continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              if target_model != "all" and r.get("model", "cpu") != target_model:
+                  continue
+              selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type}, model={target_model})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Selected {len(selected)} runners: {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  verify-runner:
+    name: "${{ matrix.name }} [${{ matrix.cluster }}]"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    steps:
+      - name: 基础环境与节点信息
+        run: |
+          echo "=========================================="
+          echo "Cluster:       ${{ matrix.cluster }}"
+          echo "Runner Name:   ${{ matrix.name }}"
+          echo "Arch:          ${{ matrix.arch }} ($(uname -m))"
+          echo "Type:          ${{ matrix.type }}"
+          echo "Model:         ${{ matrix.model }}"
+          echo "Labels:        ${{ toJson(matrix.labels) }}"
+          echo "Hostname:      $(hostname)"
+          echo "Kernel:        $(uname -r)"
+          echo "OS:            $(cat /etc/os-release | grep PRETTY_NAME || true)"
+          echo "=========================================="
+
+      - name: 检验 NPU 芯片状态 (针对 NPU 节点)
+        if: matrix.type == 'npu'
+        run: |
+          echo "=== 检查 NPU 驱动与设备文件 ==="
+          ls -ld /dev/davinci* || true
+          if command -v npu-smi >/dev/null 2>&1; then
+            echo "=== npu-smi info ==="
+            npu-smi info
+          else
+            echo "npu-smi not in current PATH, checking driver mount..."
+            if [ -d "/usr/local/Ascend/driver" ]; then
+              ls -la /usr/local/Ascend/driver/ || true
+            fi
+          fi
+
+      - name: 检验 CPU 与内存基础运算
+        run: |
+          python3 -c "
+          import sys, platform
+          print(f'Python version: {platform.python_version()}')
+          print(f'Machine: {platform.machine()}')
+          # 快速矩阵/计算验证
+          res = sum(i * i for i in range(1000000))
+          print(f'Compute check passed: sum={res}')
+          "
+
+      - name: 双标签调度验证结论
+        run: |
+          echo "✓ Runner ${{ matrix.name }} with labels ${{ toJson(matrix.labels) }} on cluster ${{ matrix.cluster }} verified successfully!"

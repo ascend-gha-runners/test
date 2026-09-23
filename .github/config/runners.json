@@ -1,31 +1,94 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "version": "1.0",
-  "description": "Cross-cluster runner provisioning configuration for e2e tests",
+  "version": "2.0",
+  "description": "Cross-cluster runner provisioning configuration for e2e tests across all 13 clusters",
   "runners": [
     {
-      "name": "gy-006-amd64-cpu-2",
-      "cluster": "gy-006",
-      "arch": "amd64",
-      "type": "cpu",
-      "labels": ["linux-amd64-cpu-2", "gy-006"],
-      "description": "贵阳006 纯 x86 CPU 测试 Runner（0 NPU 占用）"
+      "name": "gy-001-aarch64-a2-1",
+      "cluster": "gy-001",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a2",
+      "labels": ["linux-aarch64-a2-1", "gy-001"],
+      "description": "贵阳001 A2 910B 1卡 NPU Runner"
     },
     {
-      "name": "hk-001-amd64-cpu-2",
-      "cluster": "hk-001",
-      "arch": "amd64",
-      "type": "cpu",
-      "labels": ["linux-amd64-cpu-2-hk001"],
-      "description": "香港001 纯 x86 CPU 测试 Runner（ARC 0.13.0 单标签）"
+      "name": "wlcb-aarch64-a2-1",
+      "cluster": "wlcb-001",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a2",
+      "labels": ["linux-aarch64-a2-1", "wlcb-001"],
+      "description": "乌兰察布001 A2 910B 1卡 NPU Runner"
+    },
+    {
+      "name": "sz-lab-aarch64-a2-1",
+      "cluster": "sz-lab",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a2",
+      "labels": ["linux-aarch64-a2-1", "sz-lab"],
+      "description": "苏州实验室 A2 910B 1卡 NPU Runner"
     },
     {
       "name": "gy-006-aarch64-a2-1",
       "cluster": "gy-006",
       "arch": "aarch64",
       "type": "npu",
+      "model": "a2",
       "labels": ["linux-aarch64-a2-1", "gy-006"],
-      "description": "贵阳006 A2 910B 1-card NPU Runner"
+      "description": "贵阳006 A2 910B 1卡 NPU Runner"
+    },
+    {
+      "name": "gy-006-amd64-cpu-2",
+      "cluster": "gy-006",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-2", "gy-006"],
+      "description": "贵阳006 纯 x86 CPU 测试 Runner"
+    },
+    {
+      "name": "gy-003-aarch64-310p-1",
+      "cluster": "gy-003",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "310p",
+      "labels": ["linux-aarch64-310p-1", "gy-003"],
+      "description": "贵阳003 310P 1卡 NPU Runner"
+    },
+    {
+      "name": "gy-003-amd64-cpu-2",
+      "cluster": "gy-003",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-2", "gy-003"],
+      "description": "贵阳003 x86 CPU 测试 Runner"
+    },
+    {
+      "name": "gy-004-aarch64-a3-2",
+      "cluster": "gy-004",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "gy-004"],
+      "description": "贵阳004 A3 910C 2卡 NPU Runner"
+    },
+    {
+      "name": "gy-004-amd64-cpu-4",
+      "cluster": "gy-004",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-4", "gy-004"],
+      "description": "贵阳004 x86 CPU 测试 Runner"
+    },
+    {
+      "name": "cn12-001-aarch64-a3-2",
+      "cluster": "cn12-001",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "cn12-001"],
+      "description": "cn12-001 A3 910C 2卡 NPU Runner"
     },
     {
       "name": "cn12-001-amd64-cpu-4",
@@ -36,6 +99,15 @@
       "description": "cn12-001 x86 CPU 测试 Runner"
     },
     {
+      "name": "gy-005-aarch64-a3-2",
+      "cluster": "gy-005",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "gy-005"],
+      "description": "贵阳005 A3 910C 2卡 NPU Runner"
+    },
+    {
       "name": "gy-005-amd64-cpu-8",
       "cluster": "gy-005",
       "arch": "amd64",
@@ -44,36 +116,65 @@
       "description": "贵阳005 x86 CPU 测试 Runner"
     },
     {
+      "name": "sh-001-aarch64-a5-2",
+      "cluster": "sh-001",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a5",
+      "labels": ["linux-aarch64-a5-2", "sh-001"],
+      "description": "上海001 A5 2卡 NPU Runner (aarch64)"
+    },
+    {
+      "name": "sh-002-amd64-a5-2",
+      "cluster": "sh-002",
+      "arch": "amd64",
+      "type": "npu",
+      "model": "a5",
+      "labels": ["linux-amd64-a5-2", "sh-002"],
+      "description": "上海002 A5 2卡 NPU Runner (amd64)"
+    },
+    {
+      "name": "hk-001-amd64-cpu-2",
+      "cluster": "hk-001",
+      "arch": "amd64",
+      "type": "cpu",
+      "labels": ["linux-amd64-cpu-2", "hk-001"],
+      "description": "香港001 x86 CPU 测试 Runner"
+    },
+    {
       "name": "aiframework-amd64-cpu-2",
       "cluster": "aiframework",
       "arch": "amd64",
       "type": "cpu",
-      "labels": ["linux-amd64-cpu-2-aiframe"],
-      "description": "aiframework (hb-003) x86 CPU 测试 Runner（ARC 0.13.0）"
+      "labels": ["linux-amd64-cpu-2", "aiframework"],
+      "description": "aiframework (hb-003) x86 CPU 测试 Runner"
     },
     {
       "name": "mind-third-ci-amd64-cpu-2",
       "cluster": "mind-third-ci",
       "arch": "amd64",
       "type": "cpu",
-      "labels": ["linux-amd64-cpu-2-mind-third"],
-      "description": "mind-third-ci (hb-003-verl) x86 CPU 测试 Runner（ARC 0.13.0）"
+      "labels": ["linux-amd64-cpu-2", "mind-third-ci"],
+      "description": "mind-third-ci (hb-003-verl) x86 CPU 测试 Runner"
     },
     {
-      "name": "gy-004-amd64-cpu-4",
-      "cluster": "gy-004",
-      "arch": "amd64",
-      "type": "cpu",
-      "labels": ["linux-amd64-cpu-4", "gy-004"],
-      "description": "贵阳004 x86 CPU 测试 Runner（ARC 0.14.2）"
+      "name": "aiframework-aarch64-a3-2",
+      "cluster": "aiframework",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "aiframework"],
+      "description": "aiframework (hb-003) A3 910C 2卡 NPU Runner"
     },
     {
-      "name": "gy-003-amd64-cpu-2",
-      "cluster": "gy-003",
-      "arch": "amd64",
-      "type": "cpu",
-      "labels": ["linux-amd64-cpu-2-gy003"],
-      "description": "贵阳003 x86 CPU 测试 Runner（ARC 0.13.0）"
+      "name": "mind-third-ci-aarch64-a3-2",
+      "cluster": "mind-third-ci",
+      "arch": "aarch64",
+      "type": "npu",
+      "model": "a3",
+      "labels": ["linux-aarch64-a3-2", "mind-third-ci"],
+      "description": "mind-third-ci (hb-003-verl) A3 910C 2卡 NPU Runner"
     }
   ]
 }
+
