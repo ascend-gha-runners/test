@@ -87,7 +87,7 @@ jobs:
         run: |
           WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
           code=$(curl -s -o /tmp/whl-empty -w '%{http_code}' --max-time 30 \
-            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/")
+            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/" || echo 000)
           echo "non-torch /whl index: $code"
           [ "$code" = "200" ] || { echo "FAIL: /whl 非 torch 索引页非 200"; exit 1; }
           grep -q 'pypi:repository-version' /tmp/whl-empty \
@@ -98,8 +98,8 @@ jobs:
         continue-on-error: true
         run: |
           WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
-          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 90 \
-            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/")
+          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 45 \
+            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/" || echo 000)
           if [ "$code" != "200" ]; then
             echo "WARN: torch 索引 $code（download.pytorch.org 不可达），跳过改写断言"
             exit 0
@@ -115,13 +115,13 @@ jobs:
         run: |
           DEB=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
           code=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
-            --max-time 60 "$DEB/debian/dists/bookworm/Release")
+            --max-time 60 "$DEB/debian/dists/bookworm/Release" || echo 000)
           [ "$code" = "200" ] || { echo "FAIL: Debian Release code=$code"; exit 1; }
           status=$(curl -sI --retry 3 --retry-delay 3 --max-time 60 \
             "$DEB/debian/dists/bookworm/Release" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
           [ -n "$status" ] || { echo "FAIL: 无 X-Cache-Status（未经过 deb 缓存）"; exit 1; }
           ucode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
-            --max-time 60 "$DEB/ubuntu/dists/jammy/Release")
+            --max-time 60 "$DEB/ubuntu/dists/jammy/Release" || echo 000)
           [ "$ucode" = "200" ] || { echo "FAIL: Ubuntu Release code=$ucode"; exit 1; }
           deb="$DEB/debian/pool/main/h/hello/hello_2.10-2_amd64.deb"
           h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
@@ -150,7 +150,7 @@ jobs:
         run: |
           YUM=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
           u="$YUM/openEuler-22.03-LTS-SP4/OS/aarch64/repodata/repomd.xml"
-          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u")
+          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u" || echo 000)
           [ "$code" = "200" ] || { echo "FAIL: repomd.xml code=$code"; exit 1; }
           grep -q '<repomd' /tmp/repomd || { echo "FAIL: repomd 内容异常"; exit 1; }
           h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
@@ -173,7 +173,7 @@ jobs:
           if [ "$h1" = "MISS" ]; then
             [ "$h2" = "HIT" ] || { echo "FAIL: go MISS 后未 HIT"; exit 1; }
           fi
-          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info")
+          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info" || echo 000)
           [ "$icode" = "200" ] || { echo "FAIL: go .info code=$icode"; exit 1; }
           echo "PASS: Go goproxy 缓存链路正常"
 
@@ -253,7 +253,7 @@ jobs:
         run: |
           WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
           code=$(curl -s -o /tmp/whl-empty -w '%{http_code}' --max-time 30 \
-            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/")
+            "$WHL/cpu/e2e-not-a-real-pkg-${GITHUB_RUN_ID}/" || echo 000)
           echo "non-torch /whl index: $code"
           [ "$code" = "200" ] || { echo "FAIL: /whl 非 torch 索引页非 200"; exit 1; }
           grep -q 'pypi:repository-version' /tmp/whl-empty \
@@ -264,8 +264,8 @@ jobs:
         continue-on-error: true
         run: |
           WHL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl
-          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 90 \
-            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/")
+          code=$(curl -s -o /tmp/whl-torch -w '%{http_code}' --max-time 45 \
+            -H 'Accept-Encoding: identity' "$WHL/cpu/torch/" || echo 000)
           if [ "$code" != "200" ]; then
             echo "WARN: torch 索引 $code（download.pytorch.org 不可达），跳过改写断言"
             exit 0
@@ -281,13 +281,13 @@ jobs:
         run: |
           DEB=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
           code=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
-            --max-time 60 "$DEB/debian/dists/bookworm/Release")
+            --max-time 60 "$DEB/debian/dists/bookworm/Release" || echo 000)
           [ "$code" = "200" ] || { echo "FAIL: Debian Release code=$code"; exit 1; }
           status=$(curl -sI --retry 3 --retry-delay 3 --max-time 60 \
             "$DEB/debian/dists/bookworm/Release" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
           [ -n "$status" ] || { echo "FAIL: 无 X-Cache-Status（未经过 deb 缓存）"; exit 1; }
           ucode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 \
-            --max-time 60 "$DEB/ubuntu/dists/jammy/Release")
+            --max-time 60 "$DEB/ubuntu/dists/jammy/Release" || echo 000)
           [ "$ucode" = "200" ] || { echo "FAIL: Ubuntu Release code=$ucode"; exit 1; }
           deb="$DEB/debian/pool/main/h/hello/hello_2.10-2_amd64.deb"
           h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 120 "$deb" | grep -i x-cache-status | tr -d '\r' | awk '{print $2}')
@@ -316,7 +316,7 @@ jobs:
         run: |
           YUM=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
           u="$YUM/openEuler-22.03-LTS-SP4/OS/aarch64/repodata/repomd.xml"
-          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u")
+          code=$(curl -s -o /tmp/repomd -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$u" || echo 000)
           [ "$code" = "200" ] || { echo "FAIL: repomd.xml code=$code"; exit 1; }
           grep -q '<repomd' /tmp/repomd || { echo "FAIL: repomd 内容异常"; exit 1; }
           h1=$(curl -s -o /dev/null -D - --retry 3 --retry-delay 3 --max-time 60 "$u" | grep -i x-yum-cache | tr -d '\r' | awk '{print $2}')
@@ -339,7 +339,7 @@ jobs:
           if [ "$h1" = "MISS" ]; then
             [ "$h2" = "HIT" ] || { echo "FAIL: go MISS 后未 HIT"; exit 1; }
           fi
-          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info")
+          icode=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 3 --max-time 60 "$GO/github.com/gin-gonic/gin/@v/v1.10.0.info" || echo 000)
           [ "$icode" = "200" ] || { echo "FAIL: go .info code=$icode"; exit 1; }
           echo "PASS: Go goproxy 缓存链路正常"
 
