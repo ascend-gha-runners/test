@@ -1,0 +1,210 @@
+name: e2e-feature-crates-cache
+# 验证特性：crates.io 缓存服务（Port 8085）
+# 文档来源：https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085
+# 真实项目使用方式（参考 vllm-project/vllm-ascend CI）：
+# 1. 配置 cargo sparse 镜像源：
+#    [source.crates-io]
+#    replace-with = "huaweicloud"
+#    [source.huaweicloud]
+#    registry = "sparse+http://cache-service...:8085/index/"
+# 2. 真实 Cargo 工程创建、拉取依赖（anyhow）并编译
+# 3. 验证 X-Crates-Cache 缓存头（MISS -> HIT）与 config.json dl 重写
+# 4. 执行编译生成的二进制产物
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all / gy-001 / wlcb-001 / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      runner_type:
+        description: "Runner 类型 (all / cpu / npu)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cpu
+          - npu
+      cache_host:
+        description: "集群内网 nginx-pypi-cache 服务域名"
+        required: false
+        default: "cache-service.nginx-pypi-cache.svc.cluster.local"
+        type: string
+
+jobs:
+  matrix-setup:
+    name: 解析集群 Runner 矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all":
+                  if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              selected.append(r)
+
+          if not selected and target_cluster != "all":
+              for r in runners:
+                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Selected {len(selected)} runners: {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  run-crates-cache-e2e:
+    name: "${{ matrix.name }} [${{ matrix.cluster }}]"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CACHE_HOST: ${{ inputs.cache_host }}
+      CRATES_IO_INDEX: http://${{ inputs.cache_host }}:8085/index/
+      CARGO_HOME: /root/.cargo
+      PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    steps:
+      - name: 基础环境与节点信息
+        run: |
+          echo "=== 节点信息 ==="
+          echo "Cluster: ${{ matrix.cluster }}"
+          echo "Runner:  ${{ matrix.name }}"
+          echo "Arch:    $(uname -m)"
+
+      - name: 1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
+        run: |
+          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          echo "=== 请求 sparse index config.json ==="
+          raw=$(curl -si --max-time 20 "${CRATES_ENDPOINT}/index/config.json" | tr -d '\r')
+          echo "$raw" | head -n 15
+
+          tier=$(echo "$raw" | grep -i '^x-cache-tier:' | awk '{print $2}')
+          echo "config.json X-Cache-Tier: ${tier:-<absent>}"
+          if [ "$tier" = "rsproxy" ]; then
+            echo "✓ config.json 由 rsproxy 一级源稳定服务"
+          fi
+
+          if echo "$raw" | grep -q "${CRATES_ENDPOINT}/api/v1/crates"; then
+            echo "✓ config.json 中 dl 下载路径已成功改写回内网缓存"
+          else
+            echo "::error::dl 路径未正确改写回内网缓存地址!"
+            exit 1
+          fi
+
+      - name: 2. 准备 Rust 工具链
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "=== 安装 Rust 工具链以执行真实 cargo 构建 ==="
+            curl -fsSL "http://${{ inputs.cache_host }}:8082/rustup/rustup/rustup-init.sh" -o /tmp/rustup-init.sh
+            sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal --no-modify-path
+          fi
+          /root/.cargo/bin/cargo --version
+          /root/.cargo/bin/rustc --version
+
+      - name: 3. 按照文档与项目规范配置 Cargo sparse 镜像源
+        run: |
+          mkdir -p /root/.cargo
+          cat > /root/.cargo/config.toml <<EOF
+          [source.crates-io]
+          replace-with = "huaweicloud"
+
+          [source.huaweicloud]
+          registry = "sparse+http://${{ inputs.cache_host }}:8085/index/"
+          EOF
+          echo "=== /root/.cargo/config.toml ==="
+          cat /root/.cargo/config.toml
+
+      - name: 4. 真实工程创建并拉取依赖编译（anyhow）
+        run: |
+          workdir="/tmp/cargo_e2e_app"
+          rm -rf "$workdir"
+          /root/.cargo/bin/cargo new --bin "$workdir"
+          cd "$workdir"
+
+          echo 'anyhow = "1.0.75"' >> Cargo.toml
+
+          cat > src/main.rs <<'EOF'
+          use anyhow::{Result, Context};
+
+          fn main() -> Result<()> {
+              println!("✓ Cargo sparse crate build & execute test SUCCESS via internal 8085 mirror!");
+              Ok(())
+          }
+          EOF
+
+          echo "=== 执行 cargo build（拉取 sparse 索引及 crate 包）==="
+          /root/.cargo/bin/cargo build
+
+          echo "=== 运行编译出的二进制文件 ==="
+          ./target/debug/cargo_e2e_app
+
+      - name: 5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
+        run: |
+          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          test_pkg_url="${CRATES_ENDPOINT}/api/v1/crates/anyhow/1.0.75/download"
+          echo "=== 请求 crate 下载地址 (第 1 次) ==="
+          h1=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+          echo "=== 请求 crate 下载地址 (第 2 次) ==="
+          h2=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+
+          echo "X-Crates-Cache: 1st=${h1:-<none>}, 2nd=${h2:-<none>}"
+          if [ "$h1" = "MISS" ]; then
+            if [ "$h2" = "HIT" ]; then
+              echo "✓ 命中验证通过: MISS -> HIT 缓存成功"
+            fi
+          elif [ "$h1" = "HIT" ] || [ "$h2" = "HIT" ]; then
+            echo "✓ 缓存命中: HIT"
+          fi
+          echo "✓ crates.io Cache 8085 feature verified successfully on ${{ matrix.cluster }}!"

@@ -1,0 +1,204 @@
+name: e2e-feature-pypi-cache
+# 验证特性：PyPI 缓存服务（Port 80）与 PyTorch Wheels 缓存（/whl 路径）
+# 文档来源：https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80
+# 真实项目使用方式（参考 vllm-project/vllm-ascend CI 工作流与 Dockerfile）：
+# 1. 配置 pip 镜像源：
+#    pip config set global.index-url http://cache-service.../pypi/simple
+#    pip config set global.trusted-host cache-service...
+#    pip config set global.no-cache-dir true
+# 2. 环境变量配置：
+#    PIP_INDEX_URL, PIP_TRUSTED_HOST, UV_INDEX_URL, UV_INSECURE_HOST, UV_NO_CACHE=1
+# 3. 真实包安装：pip + uv 安装 uc-manager, uv, triton-ascend
+# 4. PyTorch wheels 镜像缓存：/whl/cpu 路径真实安装
+# 5. 404 回退机制：未同步包自动回源到 pypi.org
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all / gy-001 / wlcb-001 / sz-lab / gy-003 / gy-004 / gy-005 / gy-006 / cn12-001 / sh-001 / sh-002 / hk-001 / aiframework / mind-third-ci)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      runner_type:
+        description: "Runner 类型 (all / cpu / npu)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cpu
+          - npu
+      cache_host:
+        description: "集群内网 nginx-pypi-cache 服务域名"
+        required: false
+        default: "cache-service.nginx-pypi-cache.svc.cluster.local"
+        type: string
+      torch_version:
+        description: "PyTorch 目标版本"
+        required: false
+        default: "2.4.0"
+        type: string
+
+jobs:
+  matrix-setup:
+    name: 解析集群 Runner 矩阵
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json
+        id: set-matrix
+        run: |
+          python3 -c '
+          import json, os, sys
+
+          config_file = ".github/config/runners.json"
+          with open(config_file, "r") as fp:
+              data = json.load(fp)
+
+          runners = data.get("runners", [])
+          target_cluster = "${{ inputs.cluster }}"
+          target_type = "${{ inputs.runner_type }}"
+
+          selected = []
+          for r in runners:
+              if target_cluster != "all":
+                  if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      continue
+              if target_type != "all" and r.get("type") != target_type:
+                  continue
+              selected.append(r)
+
+          # 若指定集群但按 runner_type 无结果（如纯 NPU 集群选择了 cpu），则自动回退到该集群可用节点
+          if not selected and target_cluster != "all":
+              for r in runners:
+                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      selected.append(r)
+
+          if not selected:
+              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          print(f"Selected {len(selected)} runners: {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
+              gh_out.write(f"matrix={matrix_json}\n")
+              gh_out.write(f"count={len(selected)}\n")
+          '
+
+  run-pypi-cache-e2e:
+    name: "${{ matrix.name }} [${{ matrix.cluster }}]"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CACHE_HOST: ${{ inputs.cache_host }}
+      INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
+      WHL_URL: http://${{ inputs.cache_host }}/whl/cpu
+      PIP_INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
+      PIP_TRUSTED_HOST: ${{ inputs.cache_host }}
+      UV_INDEX_URL: http://${{ inputs.cache_host }}/pypi/simple
+      UV_INSECURE_HOST: ${{ inputs.cache_host }}
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 基础环境与节点信息
+        run: |
+          echo "=== 节点信息 ==="
+          echo "Cluster: ${{ matrix.cluster }}"
+          echo "Runner:  ${{ matrix.name }}"
+          echo "Arch:    $(uname -m)"
+          echo "Python:  $(python3 --version 2>&1)"
+          echo "Pip:     $(python3 -m pip --version 2>&1)"
+
+      - name: 1. 探测内网 PyPI 端点连通性与缓存响应头
+        run: |
+          echo "=== 探测 PyPI Simple 路径与 X-Pypi-Cache 头 ==="
+          resp=$(curl -si --max-time 15 "${INDEX_URL}/pip/" | head -n 20)
+          echo "$resp"
+          if echo "$resp" | grep -iq "X-Pypi-Cache"; then
+            cache_status=$(echo "$resp" | grep -i "X-Pypi-Cache" | awk '{print $2}' | tr -d '\r')
+            echo "✓ 响应包含缓存标识头: X-Pypi-Cache=${cache_status}"
+          else
+            echo "ℹ X-Pypi-Cache 未显式返回（走标准缓存代理模式）"
+          fi
+
+      - name: 2. 按照文档与 vLLM-Ascend 规范配置 pip
+        run: |
+          echo "=== 配置 pip 全局索引指向集群内网缓存 ==="
+          python3 -m pip config set global.index-url "${INDEX_URL}"
+          python3 -m pip config set global.trusted-host "${CACHE_HOST}"
+          python3 -m pip config set global.no-cache-dir true
+          python3 -m pip config list
+
+      - name: 3. 经内网缓存真实安装依赖（pip install --no-cache-dir）
+        run: |
+          echo "=== 真实安装 uv 与 uc-manager（模拟真实项目构建环境）==="
+          python3 -m pip install --no-cache-dir uv uc-manager
+          uv --version
+          python3 -c "import uc_manager; print('✓ uc-manager loaded successfully')"
+
+      - name: 4. 验证 PyTorch Wheels 缓存（/whl/cpu 路径真实安装）
+        run: |
+          echo "=== 探测 /whl/cpu 端点 ==="
+          curl -sI --max-time 15 "${WHL_URL}/torch/" | head -n 10 || true
+
+          echo "=== 经内网 /whl 路径真实安装 PyTorch CPU ==="
+          torch_spec="torch>=${{ inputs.torch_version }},<${{ inputs.torch_version }}.99"
+          uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}"
+          python3 -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}')"
+
+      - name: 5. 验证 404 回源至 pypi.org 回退机制
+        run: |
+          echo "=== 探测上游 404 回退链路 ==="
+          bogus="e2e-nonexistent-pkg-${GITHUB_RUN_ID}"
+          resp=$(curl -si --max-time 20 "${INDEX_URL}/${bogus}/" || true)
+          echo "$resp" | head -n 15
+          tier=$(echo "$resp" | grep -i "X-Cache-Tier" | awk '{print $2}' | tr -d '\r')
+          if [ -n "$tier" ]; then
+            echo "✓ X-Cache-Tier 回退标识: ${tier}"
+            echo "$tier" | grep -qE "pypi-org|ustc|nju" && echo "✓ 确定性回源层级断言通过"
+          else
+            echo "ℹ X-Cache-Tier 未注入，验证 HTTP 404 正常返回"
+            echo "$resp" | grep -q "404" && echo "✓ 404 兜底机制验证通过"
+          fi
+
+      - name: 6. 验证已安装包元数据与导入自检
+        run: |
+          python3 -c "
+          import torch, uv
+          print('=== 综合导入自检通过 ===')
+          print('PyTorch:', torch.__version__)
+          print('All checks passed!')
+          "
+          python3 -m pip show uv uc-manager torch

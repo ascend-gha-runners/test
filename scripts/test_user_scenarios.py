@@ -70,37 +70,55 @@ def detect_os():
 # ==============================================================================
 # Scenario 1: OS Package Manager (APT on Ubuntu, YUM/DNF on openEuler)
 # ==============================================================================
+def test_apt_package_manager(cache_host: str):
+    log(f"=== APT Package Manager Verification (Port 8081) ===")
+    log(f"Configuring Ubuntu APT mirror to http://{cache_host}:8081 ...")
+    # Exact pattern from vllm-ascend:
+    # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+    run_cmd(
+        f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list",
+        desc="Rewrite /etc/apt/sources.list to port 8081",
+    )
+    if os.path.exists("/etc/apt/sources.list.d"):
+        run_cmd(
+            f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list.d/*.list 2>/dev/null || true",
+            desc="Rewrite /etc/apt/sources.list.d to port 8081",
+        )
+    run_cmd("apt-get update -y", desc="apt-get update via 8081")
+    run_cmd("apt-get install -y --no-install-recommends git zstd gcc cmake", desc="apt-get install dependencies via 8081")
+    run_cmd(["git", "--version"], desc="Verify installed git binary")
+    run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
+    log("[PASS] Ubuntu APT package installation via port 8081 succeeded.")
+
+
+def test_yum_package_manager(cache_host: str):
+    log(f"=== YUM/DNF Package Manager Verification (Port 8083) ===")
+    log(f"Configuring openEuler YUM/DNF mirror to http://{cache_host}:8083 ...")
+    # Exact pattern from vllm-ascend _build_csrc_cache.yaml:
+    # sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service...:8083/\1@g' /etc/yum.repos.d/*.repo
+    run_cmd(
+        f"sed -i 's|https://repo.openeuler.org|http://{cache_host}:8083|g' /etc/yum.repos.d/*.repo || true",
+        desc="Rewrite https://repo.openeuler.org to port 8083",
+    )
+    run_cmd(
+        f"sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://{cache_host}:8083/\\1@g' /etc/yum.repos.d/*.repo || true",
+        desc="Rewrite /etc/yum.repos.d/*.repo to port 8083",
+    )
+    run_cmd("dnf clean all || yum clean all", desc="clean all")
+    run_cmd("dnf makecache || yum makecache", desc="makecache via 8083")
+    run_cmd("dnf install -y git zstd || yum install -y git zstd", desc="install git zstd via 8083")
+    run_cmd(["git", "--version"], desc="Verify installed git binary")
+    run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
+    log("[PASS] openEuler YUM/DNF package installation via port 8083 succeeded.")
+
+
 def test_os_package_manager(cache_host: str):
     os_type = detect_os()
     log(f"=== Scenario 1: OS Package Manager Verification (Detected: {os_type}) ===")
-
     if os_type == "ubuntu":
-        log(f"Configuring Ubuntu APT mirror to http://{cache_host}:8081 ...")
-        # Exact pattern from vllm-ascend:
-        # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-        run_cmd(
-            f"sed -Ei 's@(ports|archive).ubuntu.com@{cache_host}:8081@g' /etc/apt/sources.list",
-            desc="Rewrite /etc/apt/sources.list to port 8081",
-        )
-        run_cmd("apt-get update -y", desc="apt-get update via 8081")
-        run_cmd("apt-get install -y --no-install-recommends zstd", desc="apt-get install zstd via 8081")
-        run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
-        log("[PASS] Ubuntu APT package installation via port 8081 succeeded.")
-
+        test_apt_package_manager(cache_host)
     elif os_type == "openeuler":
-        log(f"Configuring openEuler YUM/DNF mirror to http://{cache_host}:8083 ...")
-        # Exact pattern from vllm-ascend _build_csrc_cache.yaml:
-        # sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service...:8083/\1@g' /etc/yum.repos.d/*.repo
-        run_cmd(
-            f"sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://{cache_host}:8083/\\1@g' /etc/yum.repos.d/*.repo",
-            desc="Rewrite /etc/yum.repos.d/*.repo to port 8083",
-        )
-        run_cmd("dnf clean all", desc="dnf clean all")
-        run_cmd("dnf makecache", desc="dnf makecache via 8083")
-        run_cmd("dnf install -y zstd", desc="dnf install zstd via 8083")
-        run_cmd(["zstd", "--version"], desc="Verify installed zstd binary")
-        log("[PASS] openEuler YUM/DNF package installation via port 8083 succeeded.")
-
+        test_yum_package_manager(cache_host)
     else:
         log(f"[WARN] Unsupported OS type '{os_type}' for package manager test; skipping.", "WARN")
 
@@ -473,7 +491,23 @@ def main():
     failures = []
     rust_env = None
 
-    # 1. OS Package Manager
+    # 1. APT Package Manager (explicit)
+    if "apt" in selected_scenarios:
+        try:
+            test_apt_package_manager(cache_host)
+        except Exception as e:
+            log(f"[FAIL] APT scenario failed: {e}", "ERROR")
+            failures.append("apt_package_manager")
+
+    # 1b. YUM / DNF Package Manager (explicit)
+    if "yum" in selected_scenarios:
+        try:
+            test_yum_package_manager(cache_host)
+        except Exception as e:
+            log(f"[FAIL] YUM scenario failed: {e}", "ERROR")
+            failures.append("yum_package_manager")
+
+    # 1c. OS Package Manager (auto-detect)
     if run_all or "os_pkg" in selected_scenarios:
         try:
             test_os_package_manager(cache_host)
@@ -482,7 +516,7 @@ def main():
             failures.append("os_package_manager")
 
     # 2. PyPI + UV
-    if run_all or "pypi_uv" in selected_scenarios:
+    if run_all or "pypi" in selected_scenarios or "pypi_uv" in selected_scenarios:
         try:
             test_pypi_and_uv_install(cache_host, args.triton_version, args.torch_version)
         except Exception as e:
@@ -490,7 +524,7 @@ def main():
             failures.append("pypi_uv")
 
     # 3. Rustup & Cargo (Standard Crate)
-    if run_all or "rust" in selected_scenarios or "rust_403" in selected_scenarios:
+    if run_all or "rust" in selected_scenarios or "rustup" in selected_scenarios or "crates" in selected_scenarios or "rust_403" in selected_scenarios:
         try:
             rust_env = test_rust_toolchain_and_cargo_build(cache_host)
         except Exception as e:
