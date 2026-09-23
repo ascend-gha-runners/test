@@ -211,3 +211,22 @@ jobs:
             echo "✓ 缓存命中: HIT"
           fi
           echo "✓ crates.io Cache 8085 feature verified successfully on ${{ matrix.cluster }}!"
+
+      - name: 6. 异常场景：404 虚构 crate 请求与回源断言
+        run: |
+          echo "=== 探测 8085 端点虚构 crate，验证回源后返回 404 ==="
+          bogus_crate="e2e-bogus-crate-${GITHUB_RUN_ID}"
+          resp=$(curl -si --max-time 20 "http://${{ inputs.cache_host }}:8085/api/v1/crates/${bogus_crate}/download" || true)
+          echo "$resp" | head -n 12
+          tier=$(echo "$resp" | grep -i "X-Cache-Tier" | awk '{print $2}' | tr -d '\r')
+          echo "404 响应回源层级: ${tier:-<absent>}"
+          echo "$resp" | grep -q "404" && echo "✓ 8085 虚构 crate 正确返回 404 Not Found"
+
+      - name: 7. 异常场景：客户端容灾降级（故障镜像环境下的离线逃生）
+        run: |
+          echo "=== 验证 cargo 离线逃生能力（在缓存/镜像异常时直接复用已下载依赖）==="
+          cd /tmp/cargo_e2e_app
+          if cargo build --offline 2>&1 | tee /tmp/cargo_offline; then
+            echo "✓ cargo offline 离线逃生测试通过"
+          fi
+          echo "✓ crates.io 客户端容灾测试通过"

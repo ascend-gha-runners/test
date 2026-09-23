@@ -150,3 +150,22 @@ jobs:
           echo 'fn main() { println!("✓ Rust compute test via port 8082 mirror passed!"); }' | rustc - -o /tmp/rust_test
           /tmp/rust_test
           echo "✓ Rust/rustup Cache (Port 8082) feature verified successfully on ${{ matrix.cluster }}!"
+
+      - name: 5. 异常场景：404 虚构版本探测与客户端容错断言
+        run: |
+          echo "=== 探测 8082 端点虚构 release channel，验证 HTTP 404 返回 ==="
+          bogus_channel="channel-rust-bogus-${GITHUB_RUN_ID}.toml"
+          resp=$(curl -si --max-time 15 "${RUSTUP_DIST_SERVER}/dist/${bogus_channel}" || true)
+          echo "$resp" | head -n 10
+          echo "$resp" | grep -q "404" && echo "✓ 8082 虚构 channel 请求正常返回 404 Not Found"
+
+      - name: 6. 异常场景：客户端容灾降级（故障镜像服务器快速报错保护）
+        run: |
+          echo "=== 模拟镜像源故障，验证 rustup-init 在不可达源下快速退出与超时保护 ==="
+          if RUSTUP_DIST_SERVER="http://127.0.0.1:59999/rustup" sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal 2>&1 | tee /tmp/rustup_err; then
+            echo "::error::故障服务器下未发生错误，断言失败!"
+            exit 1
+          else
+            echo "✓ rustup-init 成功捕获连接异常未发生无限阻塞"
+          fi
+          echo "✓ Rustup 客户端异常容灾测试通过"

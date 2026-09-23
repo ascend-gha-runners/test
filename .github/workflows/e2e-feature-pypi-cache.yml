@@ -203,3 +203,14 @@ jobs:
           print('All checks passed!')
           "
           python3 -m pip show uv uc-manager torch
+
+      - name: 7. 异常场景：客户端容灾降级（主源故障自动切换至备用内网缓存）
+        run: |
+          echo "=== 模拟主索引源不可达，验证 pip extra-index-url 自动容灾 ==="
+          python3 -m pip install --no-cache-dir \
+            --index-url "http://127.0.0.1:59999/pypi/simple" \
+            --trusted-host 127.0.0.1 \
+            --extra-index-url "${INDEX_URL}" \
+            --retries 1 \
+            idna
+          python3 -c "import idna; print('✓ 客户端容灾测试通过，idna 正常加载:', idna.__version__)"

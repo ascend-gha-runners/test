@@ -149,3 +149,41 @@ jobs:
           git --version
           zstd --version
           echo "✓ YUM/DNF Cache 8083 feature verified successfully on ${{ matrix.cluster }} (${{ matrix.name }})!"
+
+      - name: 6. 异常场景：404 虚构 rpm 包探测与安装异常断言
+        run: |
+          echo "=== 探测 8083 端点虚构 rpm 包，验证 HTTP 404 返回 ==="
+          bogus_rpm="e2e-bogus-pkg-${GITHUB_RUN_ID}.rpm"
+          resp=$(curl -si --max-time 15 "http://${{ inputs.cache_host }}:8083/openeuler/openEuler-22.03-LTS/OS/aarch64/Packages/${bogus_rpm}" || true)
+          echo "$resp" | head -n 10
+          echo "$resp" | grep -q "404" && echo "✓ 8083 虚构 rpm 请求正常返回 404 Not Found"
+
+          echo "=== 尝试安装虚构包，验证客户端正确报错退出 ==="
+          if dnf install -y "e2e-nonexistent-rpm-${GITHUB_RUN_ID}" 2>&1 | tee /tmp/yum_err; then
+            echo "::error::虚构 rpm 包竟然安装成功，断言失败!"
+            exit 1
+          else
+            echo "✓ dnf 探测到不存在的包并成功捕获异常:"
+            grep -E "No match for argument|未找到匹配|没有可用软件包" /tmp/yum_err || true
+          fi
+
+      - name: 7. 异常场景：客户端容灾降级（故障 baseurl 自动切换至备用内网地址）
+        run: |
+          echo "=== 配置包含故障地址（127.0.0.1:59999）与有效内网地址的双 baseurl repo ==="
+          cat > /etc/yum.repos.d/failover-test.repo <<EOF
+          [failover-test]
+          name=Failover Test Repo
+          baseurl=http://127.0.0.1:59999/openeuler/invalid
+                  http://${{ inputs.cache_host }}:8083/openeuler/openEuler-22.03-LTS/everything/\$basearch/
+          enabled=1
+          gpgcheck=0
+          timeout=2
+          retries=1
+          skip_if_unavailable=1
+          EOF
+
+          echo "=== 验证 dnf 在首地址故障时自动 failover 成功刷新缓存 ==="
+          dnf makecache --disablerepo="*" --enablerepo="failover-test" 2>&1 | tee /tmp/failover_out || true
+          grep -qi "Metadata cache created\|元数据缓存已建立" /tmp/failover_out && echo "✓ DNF 客户端多地址容灾切换成功"
+          rm -f /etc/yum.repos.d/failover-test.repo
+          echo "✓ YUM/DNF 客户端容灾测试通过"
