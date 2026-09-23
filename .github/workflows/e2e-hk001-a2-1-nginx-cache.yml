@@ -238,11 +238,13 @@ jobs:
             sed -Ei "s@(ports|archive).ubuntu.com@$CACHE_HOST:8081@g" /etc/apt/sources.list.d/*.list 2>/dev/null || true
           fi
           grep -E "$CACHE_HOST:8081" /etc/apt/sources.list | head -n 5 || true
+          # 有界超时：wlcb 回源不稳时快速失败进入降级分支，避免 apt 长时间重试拖满 job 超时
+          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1"
           set +e
-          apt-get update -y
+          timeout 420 apt-get $APT_OPTS update -y
           rc=$?
           if [ "$rc" -eq 0 ]; then
-            apt-get install -y --no-install-recommends git zstd
+            timeout 420 apt-get $APT_OPTS install -y --no-install-recommends git zstd
             rc=$?
           fi
           set -e
