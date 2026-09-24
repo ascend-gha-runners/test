@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ascend CI / E2E 集群测试质量看板</title>
+  <meta name="description" content="全 13 集群昇腾 NPU 测试、Nginx 缓存与真实场景自动化验证结果大盘">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="brand">
+        <div class="logo-badge">910</div>
+        <div class="brand-text">
+          <h1>Ascend CI · 集群测试质量看板</h1>
+          <p>全 13 集群算力链路 · 镜像缓存服务 · 生产场景自动化 E2E 监控大盘</p>
+        </div>
+      </div>
+      <div class="header-controls">
+        <div class="live-indicator">
+          <span class="pulse-dot"></span>
+          <span>自动更新: <strong id="auto-refresh-timer">30s</strong></span>
+        </div>
+        <button id="btn-toggle-refresh" class="btn" title="开关自动轮询刷新">⏸ 暂停自动刷新</button>
+        <button id="btn-manual-refresh" class="btn btn-primary" title="立刻获取最新测试数据">🔄 立即刷新</button>
+        <button id="btn-theme-toggle" class="btn" title="切换暗色/亮色外观">☀️ 亮色</button>
+        <a href="https://github.com/ascend-gha-runners/test" target="_blank" class="btn">GitHub 仓库 ↗</a>
+      </div>
+    </header>
+
+    <!-- Top KPI Grid -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-title">
+          <span>今日测试总数</span>
+          <span id="kpi-today-rate" class="rate-badge badge-success">--%</span>
+        </div>
+        <div class="kpi-value" id="kpi-today-total">--</div>
+        <div class="kpi-sub" id="kpi-today-pass">加载中...</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">
+          <span>历史累计测试</span>
+          <span id="kpi-overall-rate" class="rate-badge badge-success">--%</span>
+        </div>
+        <div class="kpi-value" id="kpi-total-runs">--</div>
+        <div class="kpi-sub">累计测试执行批次</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">
+          <span>已覆盖测试用例</span>
+          <span class="rate-badge badge-info">CATALOG</span>
+        </div>
+        <div class="kpi-value" id="kpi-active-suites">--</div>
+        <div class="kpi-sub">标准 E2E 验证场景规范</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">
+          <span>近期失败告警</span>
+          <span class="rate-badge badge-warning">ALERTS</span>
+        </div>
+        <div class="kpi-value" id="kpi-recent-failures">0</div>
+        <div class="kpi-sub">需要关注并排查的运行</div>
+      </div>
+    </section>
+
+    <!-- Navigation Tabs -->
+    <div class="tabs-bar">
+      <button class="tab-btn active" data-tab="by-date">
+        📅 按天展示 (Daily Timeline)
+        <span class="tab-badge" id="badge-tab-date">0</span>
+      </button>
+      <button class="tab-btn" data-tab="by-case">
+        🧪 按测试用例展示 (Test Cases)
+        <span class="tab-badge" id="badge-tab-case">0</span>
+      </button>
+      <button class="tab-btn" data-tab="matrix">
+        📊 矩阵全景大盘 (Health Matrix)
+      </button>
+      <button class="tab-btn" data-tab="failures">
+        ⚠️ 异常与失败诊断 (Failures)
+        <span class="tab-badge" id="badge-tab-fail" style="background: var(--danger-bg); color: var(--danger);">0</span>
+      </button>
+    </div>
+
+    <!-- Date Strip (Only shown when by-date tab active) -->
+    <div class="date-strip" id="date-strip">
+      <!-- Date pills rendered by JS -->
+    </div>
+
+    <!-- Filter Bar -->
+    <div class="filter-bar">
+      <input type="text" id="search-input" class="search-input" placeholder="🔍 搜索测试用例、集群 (如 gy-006)、工作流名称..." />
+      <div class="filter-group">
+        <label for="status-filter" style="font-size: 0.82rem; color: var(--text-secondary);">状态筛选:</label>
+        <select id="status-filter" class="filter-select">
+          <option value="all">全部状态 (All)</option>
+          <option value="success">仅成功 (Passed)</option>
+          <option value="failure">仅失败 (Failed)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Main Content Areas -->
+    <main>
+      <div id="content-by-date">
+        <!-- Rendered by app.js -->
+        <div class="empty-state">
+          <h3>正在加载测试数据...</h3>
+        </div>
+      </div>
+
+      <div id="content-by-case" style="display: none;">
+        <!-- Rendered by app.js -->
+      </div>
+
+      <div id="content-matrix" style="display: none;">
+        <!-- Rendered by app.js -->
+      </div>
+
+      <div id="content-failures" style="display: none;">
+        <!-- Rendered by app.js -->
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer>
+      <p>
+        Ascend GHA Runners Test Quality Dashboard · 最后数据同步时间: <strong id="last-updated">--</strong>
+      </p>
+      <p style="margin-top: 6px;">
+        由 GitHub Actions 自动化事件监听（每次测试运行完成即触发）并由 GitHub Pages 自动部署。
+        文档规范请查阅 <a href="https://ascend-gha-runners.github.io/docs/feature/" target="_blank">Platform Features</a>。
+      </p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
