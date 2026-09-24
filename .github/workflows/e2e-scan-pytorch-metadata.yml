@@ -94,7 +94,7 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster || 'gy-006' }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
           target_type = "${{ inputs.runner_type || 'cpu' }}"
 
           selected = []
