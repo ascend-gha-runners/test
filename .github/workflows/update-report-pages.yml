@@ -1,0 +1,103 @@
+name: Update Test Report Pages
+
+on:
+  workflow_run:
+    workflows:
+      - "e2e-cluster-runners"
+      - "e2e-cross-cluster-pep658"
+      - "e2e-feature-apt-cache"
+      - "e2e-feature-crates-cache"
+      - "e2e-feature-pypi-cache"
+      - "e2e-feature-rustup-cache"
+      - "e2e-feature-yum-cache"
+      - "e2e-gy006-a2-runner-smoke"
+      - "e2e-gy006-nginx-cache"
+      - "e2e-hk001-a2-1-smoke"
+      - "e2e-scan-pytorch-metadata"
+      - "e2e-user-scenarios"
+      - "Test Action Path in Container"
+      - "Test Secret Upload"
+      - "test npu"
+    types:
+      - completed
+  workflow_dispatch:
+  schedule:
+    # 兜底定时刷新，每小时同步一次，确保数据最新
+    - cron: "0 * * * *"
+
+# 防止并发冲突，排队顺序执行更新
+concurrency:
+  group: pages-report-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  actions: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore Historical Report Data from gh-pages branch
+        run: |
+          mkdir -p data
+          if git ls-remote --heads origin gh-pages | grep -q 'gh-pages'; then
+            echo "Fetching data/history.json from gh-pages branch..."
+            git fetch origin gh-pages:gh-pages || true
+            git checkout gh-pages -- data/history.json || true
+            git reset HEAD || true
+          fi
+          if [ -f data/history.json ]; then
+            echo "Found existing history.json, size: $(wc -c < data/history.json) bytes"
+          else
+            echo "No existing history.json found, will initialize from API"
+          fi
+
+      - name: Generate E2E Test Report Data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/generate_report_data.py \
+            --repo "${{ github.repository }}" \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            --history-file data/history.json \
+            --output-dir site \
+            --limit 60 \
+            --workers 4
+
+      - name: Deploy to gh-pages Branch (Data Persistence & Branch Hosting)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "chore(report): auto refresh test report pages [skip ci]"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
