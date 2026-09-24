@@ -105,7 +105,8 @@ pip install torch --index-url http://cache-service.nginx-pypi-cache.svc.cluster.
 #### 4. 判定标准
 - **硬断言**：`pip install --no-cache-dir uv uc-manager` 返回码 0；输出中无 `Using cached`；`python -c "import torch; print(torch.__version__)"` 执行成功；
 - **软断言**：请求 `/pypi/simple/six/` 响应包含 `X-Pypi-Cache` 且在二次请求呈现 HIT；
-- **探针**：请求虚构包 `e2e-nonexistent-pkg-${GITHUB_RUN_ID}` 探测 `X-Cache-Tier: pypi-org`。
+- **探针**：请求虚构包 `e2e-nonexistent-pkg-${GITHUB_RUN_ID}` 探测 `X-Cache-Tier: pypi-org`；
+- **异常与容灾断言**：请求不存在的包探测 404 回退链路；主索引源配置故障地址（如 127.0.0.1:59999）时，通过 `--extra-index-url` 能够在连接失败后秒级自动 fallback 成功安装。
 
 ---
 
@@ -121,7 +122,9 @@ pip install torch --index-url http://cache-service.nginx-pypi-cache.svc.cluster.
 #### 2. 测试目的
 1. 验证 Ubuntu 环境下经 `sed` 改写 `/etc/apt/sources.list` 后能够连通 8081 端口；
 2. 验证 `apt-get update` 索引刷新无网络阻断；
-3. 验证真实安装构建工具包（`git`, `zstd`, `gcc`, `cmake`）并验证二进制可执行。
+3. 验证真实安装构建工具包（`git`, `zstd`, `gcc`, `cmake`）并验证二进制可执行；
+4. 验证 404 虚构 deb 包与源探测异常响应；
+5. 验证 sources.list 包含不可用源时的超时跳过与客户端容灾。
 
 #### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend CI）
 ```bash
@@ -138,7 +141,8 @@ apt-get install -y --no-install-recommends git zstd gcc cmake
 #### 4. 判定标准
 - **硬断言**：`apt-get update -y` 返回码 0；`git --version`, `zstd --version`, `gcc --version` 正常输出版本；
 - **软断言**：无网络超时或重试失败；
-- **探针**：探测 `http://cache-service...:8081` 端口 HTTP 连通状态。
+- **探针**：探测 `http://cache-service...:8081` 端口 HTTP 连通状态；
+- **异常与容灾断言**：请求不存在的 deb 包正确返回 404，`apt-get install` 虚构包时正确报错退出（Unable to locate package）；当 sources.list 配置包含故障源时，配置超时与单次重试能快速忽略并由有效源提供服务。
 
 ---
 
@@ -174,7 +178,8 @@ cargo --version
 #### 4. 判定标准
 - **硬断言**：安装器退出码 0；`rustc --version` 与 `cargo --version` 成功输出有效语义版本号；
 - **软断言**：`echo 'fn main() { println!("ok"); }' | rustc - -o /tmp/t && /tmp/t` 输出成功；
-- **探针**：`X-Rustup-Cache` 缓存状态头。
+- **探针**：`X-Rustup-Cache` 缓存状态头；
+- **异常与容灾断言**：请求不存在的 channel 返回 404；当镜像服务器指向不可达地址时，安装器快速退出而不是无限 hang 住。
 
 ---
 
@@ -190,7 +195,9 @@ cargo --version
 #### 2. 测试目的
 1. 验证 openEuler 容器通过 `sed` 将官方 `repo.openeuler.org` 指向内网 8083 缓存服务；
 2. 验证 `dnf makecache` / `yum makecache` 元数据完整拉取；
-3. 验证真实安装 `git` 与 `zstd` 构建工具并正常调用。
+3. 验证真实安装 `git` 与 `zstd` 构建工具并正常调用；
+4. 验证 404 虚构 rpm 包请求返回及客户端异常捕获；
+5. 验证 repo 配置多 baseurl 时首选地址故障的自动 failover。
 
 #### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend CI）
 ```bash
@@ -205,7 +212,8 @@ dnf install -y git zstd || yum install -y git zstd
 #### 4. 判定标准
 - **硬断言**：`dnf/yum makecache` 成功返回；`git --version` 与 `zstd --version` 验证正常；
 - **软断言**：无不可达 mirror 报警；
-- **探针**：8083 端口直接探测连通性。
+- **探针**：8083 端口直接探测连通性；
+- **异常与容灾断言**：请求不存在的 rpm 包返回 404，安装虚构包时客户端正确捕获并退出；当 repo 配置首选 baseurl 故障时，DNF 能自动平滑切换至下一有效 baseurl 完成缓存构建。
 
 ---
 
@@ -222,7 +230,8 @@ dnf install -y git zstd || yum install -y git zstd
 1. 验证 `config.json` 一级源由 `rsproxy` 提供，且其内部 `dl` 下载 URL 被透明改写回集群内网 8085 端口；
 2. 验证配置 Cargo Sparse Index 后，能够真实创建工程、拉取依赖包并完成 `cargo build`；
 3. 验证生成的二进制文件正常运行；
-4. 验证 crate 压缩包请求响应头 `X-Crates-Cache` 命中（MISS → HIT）。
+4. 验证 crate 压缩包请求响应头 `X-Crates-Cache` 命中（MISS → HIT）；
+5. 验证 404 虚构 crate 请求回源与客户端离线构建逃生。
 
 #### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend CI）
 ```bash
@@ -248,6 +257,8 @@ cargo build
 #### 4. 判定标准
 - **硬断言**：`config.json` 包含改写后的 `http://cache-service...:8085/api/v1/crates`；`cargo build` 编译成功；目标二进制输出预期字串；
 - **软断言**：`config.json` 带有 `X-Cache-Tier: rsproxy`；下载接口存在 `X-Crates-Cache`；
+- **探针**：`X-Cache-Tier: rsproxy`；
+- **异常与容灾断言**：虚构 crate 下载请求返回 404 且回源至上游；镜像异常时支持通过 cargo --offline 进行已下载依赖的离线构建逃生。
 - **探针**：上游 USTC 返回 403 Access Denied 时，官方 crates-official 优雅回退兜底（PR #1722 能力）。
 
 ---
