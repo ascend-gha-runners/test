@@ -7,9 +7,10 @@ Output layout (one JSON per runner, consumed by compare_model_inventory.py):
   {
     "runner": "...", "cluster": "...", "arch": "...", "host": "...",
     "scan_time": "...",
-    "modelscope":  { "<org>/<model>": {"size_bytes": N, "files": N}, ... },
-    "huggingface": { "<org>/<model>": {"size_bytes": N, "files": N}, ... },
-    "incomplete":  { "modelscope": [...], "huggingface": ["<model>": n_blobs] }
+    "modelscope":  { "<org>/<model>": {"size_bytes": N, "files": N, "stub": bool}, ... },
+    "huggingface": { "<org>/<model>": {"size_bytes": N, "files": N, "complete": bool}, ... },
+    "trash":       { "modelscope": ["<org>/<model>", ...], "huggingface": [...] },
+    "incomplete":  { "huggingface": {"<org>/<model>": n_incomplete_blobs} }
   }
 
 Disk layouts handled:
@@ -18,12 +19,21 @@ Disk layouts handled:
   * HuggingFace: ~/.cache/huggingface/hub/models--<org>--<model>
                  (datasets--/spaces-- are ignored — models only)
 
+Noise filtering (learned from real runner caches):
+  * `*.deleteable` directories are a deletion trash-can -> collected separately,
+    never counted as models.
+  * Directories with zero regular files are phantom/stub entries -> dropped.
+  * HuggingFace completeness is judged by the presence of a non-empty
+    `snapshots/` directory (a stub has only `refs/`, tens of bytes).
+  * ModelScope has no reliable completeness marker (`._____temp` coexists with
+    fully-downloaded models), so a size threshold marks obvious stubs.
+  * Symlinks (ModelScope human-readable aliases, HF snapshot links) are skipped
+    to avoid double counting.
+
 Notes:
   * Directory names on disk are used verbatim as the model id. ModelScope
     encodes '.' as '___' (e.g. `Qwen/Qwen2.5-7B` -> `Qwen/Qwen2___5-7B`),
     which is stable across runners so cross-runner comparison still holds.
-  * Symlinks (HF snapshot entries point into blobs/) are skipped to avoid
-    double-counting; only real files contribute to size/file count.
 """
 
 import argparse
@@ -35,6 +45,14 @@ import sys
 from datetime import datetime, timezone
 
 SKIP_DIRS = {"._____temp", ".locks"}
+TRASH_SUFFIX = ".deleteable"
+# ModelScope stub heuristic: a "model" smaller than this is almost certainly a
+# pointer/partial download, not a usable model. Configurable via --min-model-bytes.
+DEFAULT_MIN_MODEL_BYTES = 1024 * 1024  # 1 MiB
+
+
+def is_trash(name):
+    return name.endswith(TRASH_SUFFIX)
 
 
 def dir_stats(path, compute_size=True):
@@ -57,11 +75,28 @@ def dir_stats(path, compute_size=True):
     return total, files
 
 
-def scan_modelscope(root, compute_size=True):
+def hf_has_snapshot(path):
+    """A completed HF cache entry has snapshots/<rev>/ with real files."""
+    snap = os.path.join(path, "snapshots")
+    if not os.path.isdir(snap):
+        return False
+    for rev in os.listdir(snap):
+        rev_dir = os.path.join(snap, rev)
+        if not os.path.isdir(rev_dir):
+            continue
+        for root, _dirs, names in os.walk(rev_dir):
+            for n in names:
+                fp = os.path.join(root, n)
+                if os.path.islink(fp) or os.path.isfile(fp):
+                    return True
+    return False
+
+
+def scan_modelscope(root, compute_size=True, min_model_bytes=DEFAULT_MIN_MODEL_BYTES):
     models = {}
-    incomplete = []
+    trash = []
     if not os.path.isdir(root):
-        return models, incomplete
+        return models, sorted(trash)
 
     # Newer ModelScope: <hub>/models/<org>/<model>; older: <hub>/<org>/<model>
     nested = os.path.join(root, "models")
@@ -75,39 +110,34 @@ def scan_modelscope(root, compute_size=True):
             continue
         # ModelScope creates a human-readable symlink (dots preserved) next to
         # the canonical `___`-encoded directory; skip the alias to avoid dupes.
-        subdirs = [
-            d
-            for d in sorted(os.listdir(org_dir))
-            if not d.startswith(".")
-            and not os.path.islink(os.path.join(org_dir, d))
-            and os.path.isdir(os.path.join(org_dir, d))
-        ]
-        if subdirs:
-            for model in subdirs:
-                size, files = dir_stats(os.path.join(org_dir, model), compute_size)
-                models[f"{org}/{model}"] = {"size_bytes": size, "files": files}
-        else:
-            # Single-segment model id (no org level).
-            size, files = dir_stats(org_dir, compute_size)
-            models[org] = {"size_bytes": size, "files": files}
-
-    # In-progress downloads (ModelScope uses ._____temp/<org>/<model>).
-    for base in (parent, root):
-        temp = os.path.join(base, "._____temp")
-        if os.path.isdir(temp):
-            for org in os.listdir(temp):
-                org_dir = os.path.join(temp, org)
-                if os.path.isdir(org_dir):
-                    for model in os.listdir(org_dir):
-                        incomplete.append(f"{org}/{model}")
-    return models, sorted(set(incomplete))
+        for model in sorted(os.listdir(org_dir)):
+            if model.startswith("."):
+                continue
+            mpath = os.path.join(org_dir, model)
+            if os.path.islink(mpath) or not os.path.isdir(mpath):
+                continue
+            mid_org = org.strip()
+            mid_model = model.strip()
+            if is_trash(model):
+                trash.append(f"{mid_org}/{mid_model[: -len(TRASH_SUFFIX)]}")
+                continue
+            size, files = dir_stats(mpath, compute_size)
+            if files == 0:
+                continue
+            models[f"{mid_org}/{mid_model}"] = {
+                "size_bytes": size,
+                "files": files,
+                "stub": bool(compute_size and (size or 0) < min_model_bytes),
+            }
+    return models, sorted(set(trash))
 
 
 def scan_huggingface(root, compute_size=True):
     models = {}
+    trash = []
     incomplete = {}
     if not os.path.isdir(root):
-        return models, incomplete
+        return models, sorted(trash), incomplete
 
     for name in sorted(os.listdir(root)):
         if name.startswith(".") or not name.startswith("models--"):
@@ -116,8 +146,19 @@ def scan_huggingface(root, compute_size=True):
         if not os.path.isdir(full) or os.path.islink(full):
             continue
         rest = name[len("models--") :]
-        mid = f"{rest.split('--', 1)[0]}/{rest.split('--', 1)[1]}" if "--" in rest else rest
+        if "--" in rest:
+            org, model = rest.split("--", 1)
+        else:
+            org, model = "", rest
+        mid_org = org.strip()
+        mid_model = model.strip()
+        mid = f"{mid_org}/{mid_model}" if mid_org else mid_model
+        if is_trash(model):
+            trash.append(mid[: -len(TRASH_SUFFIX)])
+            continue
         size, files = dir_stats(full, compute_size)
+        if files == 0:
+            continue
 
         # .incomplete blobs signal an interrupted download.
         inc = 0
@@ -126,9 +167,12 @@ def scan_huggingface(root, compute_size=True):
             inc = sum(1 for b in os.listdir(blobs) if b.endswith(".incomplete"))
         if inc:
             incomplete[mid] = inc
-        models[mid] = {"size_bytes": size, "files": files}
-
-    return models, incomplete
+        models[mid] = {
+            "size_bytes": size,
+            "files": files,
+            "complete": hf_has_snapshot(full),
+        }
+    return models, sorted(set(trash)), incomplete
 
 
 def main():
@@ -151,11 +195,19 @@ def main():
         action="store_true",
         help="Skip recursive size/file counting (faster on huge caches)",
     )
+    parser.add_argument(
+        "--min-model-bytes",
+        type=int,
+        default=DEFAULT_MIN_MODEL_BYTES,
+        help="ModelScope stub threshold in bytes (default 1 MiB)",
+    )
     args = parser.parse_args()
 
     compute_size = not args.no_size
-    ms_models, ms_inc = scan_modelscope(args.modelscope_root, compute_size)
-    hf_models, hf_inc = scan_huggingface(args.huggingface_root, compute_size)
+    ms_models, ms_trash = scan_modelscope(
+        args.modelscope_root, compute_size, args.min_model_bytes
+    )
+    hf_models, hf_trash, hf_inc = scan_huggingface(args.huggingface_root, compute_size)
 
     report = {
         "runner": args.runner,
@@ -165,23 +217,28 @@ def main():
         "scan_time": datetime.now(timezone.utc).isoformat(),
         "modelscope_root": args.modelscope_root,
         "huggingface_root": args.huggingface_root,
+        "min_model_bytes": args.min_model_bytes,
         "modelscope": ms_models,
         "huggingface": hf_models,
-        "incomplete": {"modelscope": ms_inc, "huggingface": hf_inc},
+        "trash": {"modelscope": ms_trash, "huggingface": hf_trash},
+        "incomplete": {"huggingface": hf_inc},
     }
 
     with open(args.output_json, "w", encoding="utf-8") as fp:
         json.dump(report, fp, ensure_ascii=False, indent=2)
 
+    ms_stub = sum(1 for v in ms_models.values() if v.get("stub"))
+    hf_stub = sum(1 for v in hf_models.values() if not v.get("complete"))
     print(f"runner={args.runner} cluster={args.cluster} arch={report['arch']}")
-    print(f"modelscope_root={args.modelscope_root} models={len(ms_models)} incomplete={len(ms_inc)}")
-    print(f"huggingface_root={args.huggingface_root} models={len(hf_models)} incomplete={len(hf_inc)}")
+    print(
+        f"modelscope_root={args.modelscope_root} models={len(ms_models)} "
+        f"stub={ms_stub} trash={len(ms_trash)}"
+    )
+    print(
+        f"huggingface_root={args.huggingface_root} models={len(hf_models)} "
+        f"incomplete/no-snapshot={hf_stub} trash={len(hf_trash)}"
+    )
     print(f"wrote {args.output_json}")
-    for mid in sorted(ms_models):
-        print(f"  [modelscope ] {mid}")
-    for mid in sorted(hf_models):
-        print(f"  [huggingface] {mid}")
-
     return 0
 
 
