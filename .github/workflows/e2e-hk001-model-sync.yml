@@ -1,0 +1,131 @@
+name: e2e-hk001-model-sync
+# 三个 runner 的 ModelScope / HuggingFace 模型缓存一致性比对。
+#   基准: hk-001   (linux-amd64-cpu-2-hk001, amd64 CPU)
+#   对比: gy-001   (linux-aarch64-a2-1-gy001, A2 aarch64 NPU)
+#         wlcb-001 (linux-aarch64-a2-1-wlcb001, A2 aarch64 NPU)
+#
+# 背景: 三个 runner 的作业容器都把各自集群的 SFS Turbo 共享存储挂到
+# /root/.cache (同为路径 /ascend-ci-share-nv-action-vllm-benchmarks,但物理
+# share-id 不同,见 manifests/liqo/provider-*/ascend-gha-runners-hk-001/pvc.yaml),
+# 所以模型缓存互相独立。同一个 RUN 内并发采集清单,再由 ubuntu job 汇总比对。
+#
+# 断言分级(见 AGENTS):
+#   硬断言(exit 1): hk-001 基线存在的模型,在 gy-001 / wlcb-001 上必须存在
+#   软断言(WARN) : 同名模型体积不一致
+#   信息项        : 非基线 runner 多出的模型,仅记录,不判失败
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '选择目标 runner'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - hk001
+          - gy001
+          - wlcb001
+      compute_size:
+        description: '是否递归统计每个模型的体积/文件数(大缓存可关闭以提速)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  pull_request:
+    paths:
+      - '.github/workflows/e2e-hk001-model-sync.yml'
+      - 'scripts/scan_model_inventory.py'
+      - 'scripts/compare_model_inventory.py'
+
+jobs:
+  matrix-setup:
+    name: 解析目标 runner
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: 生成 matrix（dispatch 可按 target 过滤；PR 事件跑全部）
+        id: set
+        run: |
+          target='${{ inputs.target }}'
+          if [ -z "$target" ]; then target='all'; fi
+          hk='{"target":"hk001","label":"linux-amd64-cpu-2-hk001","cluster":"hk-001","baseline":"true"}'
+          gy='{"target":"gy001","label":"linux-aarch64-a2-1-gy001","cluster":"gy-001","baseline":"false"}'
+          wl='{"target":"wlcb001","label":"linux-aarch64-a2-1-wlcb001","cluster":"wlcb-001","baseline":"false"}'
+          case "$target" in
+            hk001)    matrix="{\"include\":[$hk]}" ;;
+            gy001)    matrix="{\"include\":[$gy]}" ;;
+            wlcb001)  matrix="{\"include\":[$wl]}" ;;
+            *)        matrix="{\"include\":[$hk,$gy,$wl]}" ;;
+          esac
+          echo "matrix=${matrix}"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+  scan-models:
+    name: "${{ matrix.target }} / model-inventory"
+    needs: matrix-setup
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息与缓存挂载检查
+        run: |
+          echo "target=${{ matrix.target }} cluster=${{ matrix.cluster }} label=${{ matrix.label }} arch=$(uname -m)"
+          if [ -d /root/.cache ]; then
+            echo "[PASS] /root/.cache 已挂载"
+            df -h /root/.cache || true
+            ls -la /root/.cache || true
+          else
+            echo "[WARN] /root/.cache 未挂载，清单将为空"
+          fi
+          python3 --version
+
+      - name: 采集 ModelScope / HuggingFace 模型清单
+        run: |
+          ARGS="--runner '${{ matrix.label }}' --cluster '${{ matrix.cluster }}' \
+                --output-json model_inventory_${{ matrix.target }}.json"
+          if [ "${{ inputs.compute_size }}" = "false" ]; then
+            ARGS="$ARGS --no-size"
+          fi
+          echo "python3 scripts/scan_model_inventory.py $ARGS"
+          python3 scripts/scan_model_inventory.py $ARGS
+
+      - name: 上传模型清单 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-inventory-${{ matrix.target }}
+          path: model_inventory_${{ matrix.target }}.json
+          retention-days: 7
+
+  compare:
+    name: "以 hk-001 为基准比对缺失模型"
+    needs: [matrix-setup, scan-models]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出测试代码
+        uses: actions/checkout@v4
+
+      - name: 下载各 runner 的模型清单
+        uses: actions/download-artifact@v4
+        with:
+          pattern: model-inventory-*
+          path: reports
+
+      - name: 汇总比对结果（缺失即失败）
+        run: |
+          find reports -type f -name 'model_inventory_*.json' -print || true
+          python3 scripts/compare_model_inventory.py \
+            --reports-dir reports \
+            --baseline-cluster hk-001
