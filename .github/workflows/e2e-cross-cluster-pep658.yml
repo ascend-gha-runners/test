@@ -144,6 +144,15 @@ jobs:
             --index-url "$INDEX_URL" \
             --sample-count "$SAMPLE_COUNT"
 
+      - name: PEP 658 哈希一致性校验（非 torch 包，含 data-core-metadata）
+        # torch 自身 wheel 无 data-core-metadata，上面的 torch 校验不会真正比对哈希。
+        # 用 jinja2（torch 的依赖、也是 #1706 事故里 hash mismatch 的包）直查校验。
+        run: |
+          python3 scripts/pep658_check.py \
+            --index-url "${{ inputs.index_url }}" \
+            --package jinja2 \
+            --sample-count 5
+
       - name: Pip Dry-Run 依赖解析与下载链路校验
         run: |
           python3 scripts/pep658_check.py \
