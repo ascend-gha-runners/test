@@ -92,7 +92,15 @@ gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
 gh run watch <run-id> --repo ascend-gha-runners/test
+
+# 手动触发测试报告页面数据刷新 (日常无需执行，测试完成后自动触发)
+gh workflow run update-report-pages.yml     --repo ascend-gha-runners/test
 ```
+
+## 测试质量报告看板 (GitHub Pages)
+- 看板访问: https://ascend-gha-runners.github.io/test/
+- 触发方式: 任意 `e2e-*` 工作流 completed 时由 `update-report-pages.yml` 自动触发。
+- 数据持久化: 增量测试流水保存在 `gh-pages` 分支的 `data/history.json`，不会因 CI 日志过期而丢失。
 
 ## 历史 workflow
 `test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期

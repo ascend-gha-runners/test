@@ -4,6 +4,7 @@
 任何 [ascend-ci-deployment](https://github.com/opensourceways/ascend-ci-deployment) 的基础设施变更（Runner 部署、Nginx 缓存代理、调度器、存储挂载等）**合入前必须先在本仓库 dispatch 对应 E2E 验证全绿后再合入**。
 
 > **规范必读**：
+> - **📊 测试质量大盘 (GitHub Pages)**：[**https://ascend-gha-runners.github.io/test/**](https://ascend-gha-runners.github.io/test/)（每 1 个测试完成自动刷新，按天与测试用例维度展示全集群运行健康度）；
 > - **测试意图与验收基准**：查看 [**`docs/test-cases.md`**](docs/test-cases.md)（所有用例的规格说明、输入输出、断言分级与容灾标准）；
 > - **用例元数据清单**：查看 [**`.github/config/test_cases.json`**](.github/config/test_cases.json)（机器可读配置与执行引擎映射）；
 > - **开发规范与避坑指南**：查看 [**`AGENTS.md`**](AGENTS.md)（断言分级、确定性回源断言模式、已踩坑清单）。
@@ -82,8 +83,19 @@ python3 scripts/test_user_scenarios.py --case TC-FEAT-CRATES
 python3 scripts/test_user_scenarios.py --scenarios all
 ```
 
+## 五、测试质量大盘 (Test Quality Dashboard)
+
+本仓库提供由 GitHub Pages 承载的自动化测试质量看板：
+- **访问地址**：[https://ascend-gha-runners.github.io/test/](https://ascend-gha-runners.github.io/test/)
+- **自动刷新机制**：由 [`.github/workflows/update-report-pages.yml`](.github/workflows/update-report-pages.yml) 监听所有 `e2e-*` 验证工作流，**只要任意 1 个测试完成（无论是定时 schedule 还是手动 dispatch），便即刻自动刷新大盘**。
+- **展示维度**：
+  1. **按天展示 (Daily Timeline)**：展示每日通过率走势、单日运行总览、当日所有用例及细分子 Job（集群）的执行流水与耗时；
+  2. **按测试用例展示 (Test Cases)**：关联 [`.github/config/test_cases.json`](.github/config/test_cases.json) 规格，展示平台特性用例的硬断言、历史通过率及历史表现；
+  3. **矩阵全景大盘 (Health Matrix)**：用例 × 日期的二维状态热力网格；
+  4. **异常与失败诊断 (Failures)**：聚焦最近报错的 Job、集群、失败 Step 与 Actions 排查入口。
+
 ---
 
-## 五、历史 workflow
+## 六、历史 workflow
 
 `test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期手工测试，保留作参考，新用例不要模仿其结构。
