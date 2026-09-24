@@ -201,6 +201,58 @@
           "各集群时延与网络吞吐指标"
         ]
       }
+    },
+    {
+      "id": "TC-FEAT-A2-NGINX-CACHE",
+      "name": "hk-001 A2 (gy-001/wlcb-001) nginx-pypi-cache(-new) 真实客户场景",
+      "category": "platform-feature",
+      "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
+      "service_port": 80,
+      "client": ["pip", "apt-get", "dnf", "rustup", "go"],
+      "workflow": ".github/workflows/e2e-hk001-a2-1-nginx-cache.yml",
+      "engine_scenario": "native-clients",
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
+      "target_clusters": "gy-001,wlcb-001",
+      "assertions": {
+        "hard": [
+          "pip 经 :80 真实安装 PyPI 包并 import 成功 (gy001)",
+          "pip 经 :80 /whl/cpu 真实安装 PyTorch 并 import torch (gy001)",
+          "dnf 经 :8083 真实安装 git/zstd (openEuler)",
+          "rustup 经 :8082 真实安装 stable 工具链并编译运行",
+          "go 经 :8084 真实 go get/build",
+          "apt-get 经 :8081 真实安装 git/zstd (Ubuntu)"
+        ],
+        "soft": [
+          "X-Pypi-Cache / X-Rustup-Cache / X-Yum-Cache / X-Go-Cache / X-Cache-Status 命中头"
+        ],
+        "probe": [
+          "wlcb001 cache 回源不稳定（nginx connect 110 超时）时回源类场景 WARN 降级，不阻塞"
+        ]
+      }
+    },
+    {
+      "id": "TC-MODEL-SYNC-HK001",
+      "name": "hk-001 / gy-001 / wlcb-001 三 runner ModelScope + HuggingFace 模型缓存一致性",
+      "category": "storage-consistency",
+      "feature_doc": "https://ascend-gha-runners.github.io/docs/",
+      "service_port": null,
+      "client": ["python", "filesystem"],
+      "workflow": ".github/workflows/e2e-hk001-model-sync.yml",
+      "engine_scenario": "model-cache-inventory",
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
+      "target_clusters": "hk-001,gy-001,wlcb-001",
+      "assertions": {
+        "hard": [
+          "以 hk-001 为基线，基线存在的模型在 gy-001 / wlcb-001 上必须存在",
+          "ModelScope 与 HuggingFace 两个模型源分别独立比对"
+        ],
+        "soft": [
+          "同名模型体积不一致时 WARN，不阻塞"
+        ],
+        "probe": [
+          "非基线 runner 多出的模型仅记录；基线清单为空时跳过比对"
+        ]
+      }
     }
   ]
 }

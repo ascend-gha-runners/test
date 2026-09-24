@@ -91,8 +91,27 @@ gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 # 烟测与全链路用例
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
+
+# hk-001 A2(gy-001/wlcb-001) 的 nginx 真实客户场景（同一份 steps 用 matrix 跑两个 runner）
+gh workflow run e2e-hk001-a2-1-nginx-cache.yml --repo ascend-gha-runners/test -f target=all
 gh run watch <run-id> --repo ascend-gha-runners/test
+
+# hk-001 / gy-001 / wlcb-001 三 runner 的 modelscope+huggingface 模型缓存一致性
+# （以 hk-001 为基线，缺失即硬断言失败）
+gh workflow run e2e-hk001-model-sync.yml --repo ascend-gha-runners/test -f target=all
 ```
+
+> 说明：`e2e-hk001-model-sync.yml` 并发采集三个 runner 的
+> `~/.cache/modelscope/hub` 与 `~/.cache/huggingface/hub` 清单（三者挂的是各自集群
+> 独立 SFS Turbo，见 `manifests/liqo/provider-*/ascend-gha-runners-hk-001/pvc.yaml`），
+> 再由 ubuntu job 以 hk-001 为基准比出 gy-001 / wlcb-001 缺失的模型。
+> 扫描脚本 `scripts/scan_model_inventory.py`、比对脚本
+> `scripts/compare_model_inventory.py`。
+
+> 说明：`e2e-hk001-a2-1-nginx-cache.yml` 用 `matrix`（gy001/wlcb001）复用同一份 steps。
+> `wlcb001` 的 cache 回源不稳定（nginx error log `connect() failed (110: Connection
+> timed out) while connecting to upstream`），matrix 项设 `degrade=true`：回源类场景
+> 失败时 WARN 跳过（不阻塞），本地断言仍硬断言；`gy001` 一律硬断言。
 
 ## 历史 workflow
 `test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期
