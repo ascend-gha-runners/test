@@ -12,12 +12,11 @@ on:
       - "e2e-feature-yum-cache"
       - "e2e-gy006-a2-runner-smoke"
       - "e2e-gy006-nginx-cache"
+      - "e2e-hk001-a2-1-nginx-cache"
       - "e2e-hk001-a2-1-smoke"
+      - "e2e-hk001-model-sync"
       - "e2e-scan-pytorch-metadata"
       - "e2e-user-scenarios"
-      - "Test Action Path in Container"
-      - "Test Secret Upload"
-      - "test npu"
     types:
       - completed
   workflow_dispatch:

@@ -3,11 +3,13 @@
 Generate and Update E2E Test Report Data for GitHub Pages
 Fetches GitHub Actions workflow runs and jobs, maintains historical data incrementally,
 and aggregates metrics by date (day) and test case.
+Ensures ALL 'e2e-*' workflows are automatically captured.
 """
 
 import argparse
 import concurrent.futures
 import datetime
+import glob
 import json
 import os
 import re
@@ -50,7 +52,7 @@ def parse_args():
     parser.add_argument(
         "--limit",
         type=int,
-        default=60,
+        default=100,
         help="Maximum number of recent runs to fetch from GitHub API",
     )
     parser.add_argument(
@@ -64,15 +66,18 @@ def parse_args():
         action="store_true",
         help="Force re-fetching jobs for completed runs even if cached in history",
     )
+    parser.add_argument(
+        "--sync-workflow-yaml",
+        action="store_true",
+        help="Automatically sync all e2e-*.yml workflow names into update-report-pages.yml",
+    )
     return parser.parse_args()
 
 
 def get_default_token():
-    # 1. From env
     tok = os.environ.get("GITHUB_TOKEN", "")
     if tok:
         return tok
-    # 2. Try gh auth token
     try:
         proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
         t = proc.stdout.strip()
@@ -121,7 +126,7 @@ def github_api_get(url, token=None):
         return None
 
 
-def fetch_runs_via_gh(repo, limit=60):
+def fetch_runs_via_gh(repo, limit=100):
     cmd = [
         "gh",
         "run",
@@ -142,9 +147,6 @@ def fetch_runs_via_gh(repo, limit=60):
 
 
 def fetch_jobs_for_run(repo, run_id, token=""):
-    """
-    Fetch jobs using HTTP API with token, fallback to gh cli with retry.
-    """
     if token:
         url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
         data = github_api_get(url, token)
@@ -204,6 +206,22 @@ def extract_cluster_from_job_name(job_name):
     return "all"
 
 
+def is_e2e_workflow(name, path="", workflow_name=""):
+    """
+    Check if a run belongs to an E2E test workflow.
+    Must start with 'e2e-' (case-insensitive) in name, workflow_name, or path.
+    """
+    candidates = [name or "", workflow_name or ""]
+    for c in candidates:
+        if c.strip().lower().startswith("e2e-"):
+            return True
+    if path:
+        base = os.path.basename(path).lower()
+        if base.startswith("e2e-"):
+            return True
+    return False
+
+
 def get_test_case_info(workflow_name, catalog):
     wf_clean = workflow_name.replace(".yml", "").replace(".yaml", "").strip()
     if wf_clean in catalog:
@@ -227,17 +245,93 @@ def get_test_case_info(workflow_name, catalog):
         "e2e-gy006-a2-runner-smoke": "GY-006 集群 A2-Runner 基础烟测",
         "e2e-gy006-nginx-cache": "GY-006 集群 Nginx 缓存综合验证",
         "e2e-hk001-a2-1-smoke": "HK-001 集群 A2-1 烟测与基础环境连通性",
+        "e2e-hk001-a2-1-nginx-cache": "HK-001 集群 A2-1 Nginx 缓存验证",
+        "e2e-hk001-model-sync": "HK-001 集群模型同步与清单抽检",
         "e2e-scan-pytorch-metadata": "PyTorch 元数据全量扫描验证",
         "e2e-user-scenarios": "真实生产用户组合全链路场景验证",
     }
 
+    if wf_clean in friendly_titles:
+        title = friendly_titles[wf_clean]
+    else:
+        parts = wf_clean.replace("e2e-", "").split("-")
+        title = "E2E · " + " ".join(p.capitalize() for p in parts)
+
+    wf_lower = wf_clean.lower()
+    if "feature" in wf_lower or "cache" in wf_lower:
+        category = "platform-feature"
+    elif "cluster" in wf_lower or "runner" in wf_lower:
+        category = "runner-scheduling"
+    elif "pep658" in wf_lower or "metadata" in wf_lower:
+        category = "index-integrity"
+    elif "scenario" in wf_lower or "user" in wf_lower:
+        category = "user-scenario"
+    elif "smoke" in wf_lower:
+        category = "smoke-test"
+    else:
+        category = "e2e-test"
+
     return {
         "test_case_id": wf_clean,
-        "title": friendly_titles.get(wf_clean, wf_clean),
-        "category": "e2e-test",
+        "title": title,
+        "category": category,
         "doc_url": "https://ascend-gha-runners.github.io/docs/feature/",
         "assertions": {},
     }
+
+
+def find_all_e2e_workflows_in_repo(workflows_dir=".github/workflows"):
+    pattern = os.path.join(workflows_dir, "e2e-*.yml")
+    pattern_yaml = os.path.join(workflows_dir, "e2e-*.yaml")
+    files = sorted(glob.glob(pattern) + glob.glob(pattern_yaml))
+    
+    wf_names = set()
+    for fpath in files:
+        base = os.path.basename(fpath).replace(".yml", "").replace(".yaml", "")
+        wf_names.add(base)
+        try:
+            with open(fpath, "r", encoding="utf-8") as fp:
+                for line in fp:
+                    line_str = line.strip()
+                    if line_str.startswith("name:"):
+                        name_val = line_str[5:].strip().strip("\"'").strip()
+                        if name_val:
+                            wf_names.add(name_val)
+                        break
+        except Exception:
+            pass
+    return sorted(wf_names)
+
+
+def sync_workflow_triggers(workflows_dir=".github/workflows", target_workflow=".github/workflows/update-report-pages.yml"):
+    if not os.path.exists(target_workflow):
+        return
+
+    all_e2e = find_all_e2e_workflows_in_repo(workflows_dir)
+    known_extra = ["e2e-hk001-a2-1-nginx-cache", "e2e-hk001-model-sync"]
+    for ex in known_extra:
+        if ex not in all_e2e:
+            all_e2e.append(ex)
+    all_e2e.sort()
+
+    try:
+        with open(target_workflow, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        wf_lines = ["    workflows:"]
+        for w in all_e2e:
+            wf_lines.append(f'      - "{w}"')
+        new_wf_block = "\n".join(wf_lines)
+
+        pattern = r"    workflows:\s*(?:\n\s*-\s*\"[^\"]+\")+"
+        if re.search(pattern, content):
+            new_content = re.sub(pattern, new_wf_block, content, count=1)
+            if new_content != content:
+                with open(target_workflow, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                print(f"[INFO] Synced {len(all_e2e)} E2E workflows into {target_workflow}")
+    except Exception as e:
+        print(f"[WARN] Failed to sync workflow triggers: {e}", file=sys.stderr)
 
 
 def main():
@@ -245,13 +339,15 @@ def main():
     if not args.token:
         args.token = get_default_token()
 
+    if args.sync_workflow_yaml:
+        sync_workflow_triggers()
+
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(args.history_file) if os.path.dirname(args.history_file) else ".", exist_ok=True)
 
     catalog = load_test_cases_catalog(args.test_cases_config)
     print(f"[INFO] Loaded {len(catalog)} test case definitions from catalog")
 
-    # Load existing history
     history_runs = {}
     if os.path.exists(args.history_file):
         try:
@@ -259,15 +355,16 @@ def main():
                 raw_hist = json.load(f)
                 if isinstance(raw_hist, dict) and "runs" in raw_hist:
                     for r in raw_hist["runs"]:
-                        history_runs[str(r["id"])] = r
+                        if is_e2e_workflow(r.get("name"), "", r.get("workflow_name")):
+                            history_runs[str(r["id"])] = r
                 elif isinstance(raw_hist, list):
                     for r in raw_hist:
-                        history_runs[str(r["id"])] = r
-            print(f"[INFO] Loaded {len(history_runs)} existing historical runs from {args.history_file}")
+                        if is_e2e_workflow(r.get("name"), "", r.get("workflow_name")):
+                            history_runs[str(r["id"])] = r
+            print(f"[INFO] Loaded {len(history_runs)} existing historical E2E runs from {args.history_file}")
         except Exception as e:
             print(f"[WARN] Failed to load history file: {e}", file=sys.stderr)
 
-    # Fetch recent runs
     raw_runs = None
     try:
         raw_runs = fetch_runs_via_gh(args.repo, args.limit)
@@ -285,6 +382,7 @@ def main():
                     "databaseId": item.get("id"),
                     "name": item.get("name"),
                     "workflowName": item.get("name"),
+                    "workflowPath": item.get("path"),
                     "workflowDatabaseId": item.get("workflow_id"),
                     "conclusion": item.get("conclusion"),
                     "status": item.get("status"),
@@ -303,11 +401,15 @@ def main():
             sys.exit(1)
         raw_runs = []
 
-    print(f"[INFO] Evaluating {len(raw_runs)} fetched runs against cache...")
+    # FILTER: ONLY KEEP 'e2e-*' WORKFLOWS
+    e2e_runs = [
+        r for r in raw_runs
+        if is_e2e_workflow(r.get("name"), r.get("workflowPath", ""), r.get("workflowName"))
+    ]
+    print(f"[INFO] Filtered {len(e2e_runs)} E2E runs (out of {len(raw_runs)} total fetched runs)")
 
-    # Identify runs needing jobs
     runs_needing_jobs = []
-    for r in raw_runs:
+    for r in e2e_runs:
         run_id_str = str(r["databaseId"])
         cached = history_runs.get(run_id_str)
         needs_jobs = False
@@ -325,7 +427,6 @@ def main():
 
     print(f"[INFO] {len(runs_needing_jobs)} runs require job details fetching (concurrency: {args.workers})")
 
-    # Fetch jobs concurrently
     fetched_jobs_map = {}
     if runs_needing_jobs:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -342,8 +443,7 @@ def main():
                     print(f"[WARN] Run {rid} jobs fetch generated an exception: {exc}")
                     fetched_jobs_map[rid] = []
 
-    # Merge into history
-    for r in raw_runs:
+    for r in e2e_runs:
         run_id = r["databaseId"]
         run_id_str = str(run_id)
         cached = history_runs.get(run_id_str)
@@ -432,18 +532,15 @@ def main():
         }
         history_runs[run_id_str] = record
 
-    print(f"[INFO] History synchronized. Total tracked runs: {len(history_runs)}")
+    print(f"[INFO] History synchronized. Total tracked E2E runs: {len(history_runs)}")
 
-    # Sort all runs descending by created_at
     all_runs = list(history_runs.values())
     all_runs.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
-    # Save to history file
     with open(args.history_file, "w", encoding="utf-8") as f:
         json.dump({"runs": all_runs}, f, indent=2, ensure_ascii=False)
     print(f"[INFO] Saved history to {args.history_file}")
 
-    # Build Aggregations
     total_runs = len(all_runs)
     completed_runs = [r for r in all_runs if r.get("status") == "completed"]
     passed_runs = [r for r in completed_runs if r.get("conclusion") == "success"]
