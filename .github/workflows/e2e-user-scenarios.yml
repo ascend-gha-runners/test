@@ -10,6 +10,9 @@ name: e2e-user-scenarios
 # 3. 跨集群驱动：基于 .github/config/runners.json 支持全部 13 个集群 Runner 矩阵执行
 
 on:
+  schedule:
+    # 每天 UTC 20:30（北京时间 04:30，凌晨错峰）全集群端到端全链路真实用户场景测试
+    - cron: "30 20 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -79,8 +82,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -117,6 +120,10 @@ jobs:
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      SCENARIOS: ${{ inputs.scenarios || 'all' }}
+      STRICT_403: ${{ inputs.strict_403 || 'false' }}
     steps:
       - name: 配置 Git 镜像代理 (加速 GitHub 访问)
         run: |
@@ -138,11 +145,11 @@ jobs:
       - name: 执行真实用户场景测试套件
         run: |
           STRICT_FLAG=""
-          if [ "${{ inputs.strict_403 }}" = "true" ]; then
+          if [ "$STRICT_403" = "true" ]; then
             STRICT_FLAG="--strict-403"
           fi
 
           python3 scripts/test_user_scenarios.py \
-            --cache-host "${{ inputs.cache_host }}" \
-            --scenarios "${{ inputs.scenarios }}" \
+            --cache-host "$CACHE_HOST" \
+            --scenarios "$SCENARIOS" \
             ${STRICT_FLAG}

@@ -12,6 +12,9 @@ name: e2e-feature-crates-cache
 # 4. 执行编译生成的二进制产物
 
 on:
+  schedule:
+    # 每天 UTC 19:30（北京时间 03:30，凌晨错峰）全集群 crates.io 缓存（Port 8085）验证
+    - cron: "30 19 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -71,8 +74,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -110,8 +113,8 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
-      CACHE_HOST: ${{ inputs.cache_host }}
-      CRATES_IO_INDEX: http://${{ inputs.cache_host }}:8085/index/
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      CRATES_IO_INDEX: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8085/index/
       CARGO_HOME: /root/.cargo
       PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
@@ -124,7 +127,7 @@ jobs:
 
       - name: 1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
         run: |
-          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           echo "=== 请求 sparse index config.json ==="
           raw=$(curl -si --max-time 20 "${CRATES_ENDPOINT}/index/config.json" | tr -d '\r')
           echo "$raw" | head -n 15
@@ -149,7 +152,7 @@ jobs:
         run: |
           if ! command -v cargo >/dev/null 2>&1; then
             echo "=== 安装 Rust 工具链以执行真实 cargo 构建 ==="
-            curl -fsSL "http://${{ inputs.cache_host }}:8082/rustup/rustup/rustup-init.sh" -o /tmp/rustup-init.sh
+            curl -fsSL "http://${CACHE_HOST}:8082/rustup/rustup/rustup-init.sh" -o /tmp/rustup-init.sh
             sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh
             sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal --no-modify-path
           fi
@@ -164,7 +167,7 @@ jobs:
           replace-with = "huaweicloud"
 
           [source.huaweicloud]
-          registry = "sparse+http://${{ inputs.cache_host }}:8085/index/"
+          registry = "sparse+http://${CACHE_HOST}:8085/index/"
           EOF
           echo "=== /root/.cargo/config.toml ==="
           cat /root/.cargo/config.toml
@@ -195,7 +198,7 @@ jobs:
 
       - name: 5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
         run: |
-          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           test_pkg_url="${CRATES_ENDPOINT}/api/v1/crates/anyhow/1.0.75/download"
           echo "=== 请求 crate 下载地址 (第 1 次) ==="
           h1=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')

@@ -11,6 +11,9 @@ name: e2e-feature-yum-cache
 # 3. 验证软件包二进制版本与执行
 
 on:
+  schedule:
+    # 每天 UTC 19:00（北京时间 03:00，凌晨错峰）全集群 YUM/DNF 缓存（Port 8083）验证
+    - cron: "0 19 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -70,8 +73,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -109,7 +112,7 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
-      CACHE_HOST: ${{ inputs.cache_host }}
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
     steps:
       - name: 基础环境与操作系统诊断
         run: |
@@ -122,15 +125,15 @@ jobs:
       - name: 1. 探测内网 YUM 缓存端口（8083）连通性
         run: |
           echo "=== 探测 YUM 缓存服务 (8083) ==="
-          curl -sI --connect-timeout 5 "http://${{ inputs.cache_host }}:8083" || echo "Note: Port 8083 root path probed, continuing to repository test"
+          curl -sI --connect-timeout 5 "http://${CACHE_HOST}:8083" || echo "Note: Port 8083 root path probed, continuing to repository test"
 
       - name: 2. 按照文档与 vLLM-Ascend 规范重写 YUM 源配置
         run: |
           echo "=== 替换 /etc/yum.repos.d/*.repo 为 8083 缓存端口 ==="
-          sed -i "s|https://repo.openeuler.org|http://${{ inputs.cache_host }}:8083|g" /etc/yum.repos.d/*.repo || true
-          sed -Ei "s@https?://[^/]+/(openeuler|centos|fedora)@http://${{ inputs.cache_host }}:8083/\\1@g" /etc/yum.repos.d/*.repo || true
+          sed -i "s|https://repo.openeuler.org|http://${CACHE_HOST}:8083|g" /etc/yum.repos.d/*.repo || true
+          sed -Ei "s@https?://[^/]+/(openeuler|centos|fedora)@http://${CACHE_HOST}:8083/\\1@g" /etc/yum.repos.d/*.repo || true
           echo "=== 检查修改后的 yum 源 ==="
-          grep -E "${{ inputs.cache_host }}:8083" /etc/yum.repos.d/*.repo | head -n 10
+          grep -E "${CACHE_HOST}:8083" /etc/yum.repos.d/*.repo | head -n 10
 
       - name: 3. 经内网缓存真实执行 makecache
         run: |
