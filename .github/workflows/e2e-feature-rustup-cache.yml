@@ -162,10 +162,11 @@ jobs:
       - name: 6. 异常场景：客户端容灾降级（故障镜像服务器快速报错保护）
         run: |
           echo "=== 模拟镜像源故障，验证 rustup-init 在不可达源下快速退出与超时保护 ==="
-          if RUSTUP_DIST_SERVER="http://127.0.0.1:59999/rustup" sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal 2>&1 | tee /tmp/rustup_err; then
+          RUSTUP_DIST_SERVER="http://127.0.0.1:59999/rustup" sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal > /tmp/rustup_err 2>&1 && success=true || success=false
+          cat /tmp/rustup_err
+          if [ "$success" = "true" ]; then
             echo "::error::故障服务器下未发生错误，断言失败!"
             exit 1
-          else
-            echo "✓ rustup-init 成功捕获连接异常未发生无限阻塞"
           fi
+          echo "✓ rustup-init 成功捕获连接异常未发生无限阻塞"
           echo "✓ Rustup 客户端异常容灾测试通过"

@@ -162,13 +162,14 @@ jobs:
           echo "$resp" | grep -q "404" && echo "✓ 8081 虚构 deb 请求正常返回 404 Not Found"
 
           echo "=== 尝试安装虚构包，验证客户端正确报错退出 ==="
-          if apt-get install -y --dry-run "e2e-nonexistent-deb-${GITHUB_RUN_ID}" 2>&1 | tee /tmp/apt_err; then
+          apt-get install -y --dry-run "e2e-nonexistent-deb-${GITHUB_RUN_ID}" > /tmp/apt_err 2>&1 && installed=true || installed=false
+          cat /tmp/apt_err
+          if [ "$installed" = "true" ]; then
             echo "::error::虚构包竟然安装成功，断言失败!"
             exit 1
-          else
-            echo "✓ apt-get 探测到不存在的包并成功捕获异常:"
-            grep -E "Unable to locate package|无法定位软件包" /tmp/apt_err || true
           fi
+          echo "✓ apt-get 探测到不存在的包并成功捕获异常:"
+          grep -E "Unable to locate package|无法定位软件包" /tmp/apt_err || true
 
       - name: 7. 异常场景：客户端容灾降级（故障源超时跳过与有效源兜底）
         run: |
