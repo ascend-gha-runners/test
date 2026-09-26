@@ -160,7 +160,12 @@ jobs:
           bogus_channel="channel-rust-bogus-${GITHUB_RUN_ID}.toml"
           resp=$(curl -si --max-time 15 "${RUSTUP_DIST_SERVER}/dist/${bogus_channel}" || true)
           echo "$resp" | head -n 10
-          echo "$resp" | grep -q "404" && echo "✓ 8082 虚构 channel 请求正常返回 404 Not Found"
+          if echo "$resp" | grep -q "404"; then
+            echo "✓ 8082 虚构 channel 请求正常返回 404 Not Found"
+          else
+            echo "::error::8082 虚构 channel 请求未返回预期 404 响应"
+            exit 1
+          fi
 
       - name: 6. 异常场景：客户端容灾降级（故障镜像服务器快速报错保护）
         run: |

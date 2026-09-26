@@ -37,7 +37,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simulate vllm-ascend CI dependency install via nginx-pypi-cache")
     parser.add_argument(
         "--cache-host",
-        default="cache-service.nginx-pypi-cache.svc.cluster.local",
+        default=os.environ.get("CACHE_HOST", "cache-service.nginx-pypi-cache.svc.cluster.local"),
         help="Internal nginx-pypi-cache hostname",
     )
     parser.add_argument(
@@ -215,19 +215,32 @@ def main():
     )
 
     # Step 6: Install PyTorch CPU via uv (simulating vllm-ascend workflow)
-    log("\n=== Phase 6: Installing torch from internal whl/cpu repo ===")
-    # whl/cpu has torch==2.4.0 (aarch64) or torch==2.4.0+cpu (x86_64).
-    # Using range "torch>=2.4.0,<2.5.0" reliably resolves the platform wheel from whl/cpu
+    log("\n=== Phase 6: Installing torch from internal repo ===")
     torch_spec = f"torch>={args.torch_version},<{args.torch_version.rsplit('.', 1)[0]}.99"
-    run_cmd(
-        uv_base_cmd + [
-            "pip", "install",
-            "--no-cache",
-            torch_spec,
-        ],
-        env=sim_env,
-        desc=f"uv pip install {torch_spec}",
-    )
+    if arch in ("x86_64", "amd64"):
+        run_cmd(
+            uv_base_cmd + [
+                "pip", "install",
+                "--no-cache",
+                torch_spec,
+            ],
+            env=sim_env,
+            desc=f"uv pip install {torch_spec} (internal whl/cpu repo)",
+        )
+    else:
+        # On aarch64, /whl/cpu has no wheels (only x86_64/win_amd64). Install torch from PyPI simple mirror
+        log(f"Architecture is {arch}; PyTorch CPU wheel is not on /whl/cpu for {arch}, installing torch from internal pypi mirror.")
+        sim_env_arm = sim_env.copy()
+        sim_env_arm["UV_EXTRA_INDEX_URL"] = ascend_url
+        run_cmd(
+            uv_base_cmd + [
+                "pip", "install",
+                "--no-cache",
+                torch_spec,
+            ],
+            env=sim_env_arm,
+            desc=f"uv pip install {torch_spec} (internal pypi repo for {arch})",
+        )
 
     # Step 7: Verify Python imports & package metadata
     log("\n=== Phase 7: Validating installed packages and imports ===")

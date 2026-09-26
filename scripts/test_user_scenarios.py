@@ -72,6 +72,10 @@ def detect_os():
 # ==============================================================================
 def test_apt_package_manager(cache_host: str):
     log(f"=== APT Package Manager Verification (Port 8081) ===")
+    os_type = detect_os()
+    if os_type != "ubuntu":
+        log(f"[WARN] APT package manager scenario requested but detected OS is '{os_type}' (not Ubuntu); skipping.", "WARN")
+        return
     log(f"Configuring Ubuntu APT mirror to http://{cache_host}:8081 ...")
     # Exact pattern from vllm-ascend:
     # sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -93,6 +97,10 @@ def test_apt_package_manager(cache_host: str):
 
 def test_yum_package_manager(cache_host: str):
     log(f"=== YUM/DNF Package Manager Verification (Port 8083) ===")
+    os_type = detect_os()
+    if os_type != "openeuler":
+        log(f"[WARN] YUM/DNF package manager scenario requested but detected OS is '{os_type}' (not openEuler); skipping.", "WARN")
+        return
     log(f"Configuring openEuler YUM/DNF mirror to http://{cache_host}:8083 ...")
     # Exact pattern from vllm-ascend _build_csrc_cache.yaml:
     # sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service...:8083/\1@g' /etc/yum.repos.d/*.repo
