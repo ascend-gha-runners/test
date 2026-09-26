@@ -18,7 +18,8 @@
         "hard": [
           "pip/uv 依赖真实安装成功 (uc-manager, uv)",
           "无本地磁盘缓存命中 (禁止 Using cached)",
-          "PyTorch 经 /whl/cpu 真实安装且 import torch 成功",
+          "华为昇腾专属源经 /ascend/repos/pypi 真实安装 triton-ascend 并验证 import triton",
+          "PyTorch 经 /whl/cpu 真实安装且 import torch 成功 (amd64 架构)",
           "404 请求回退至 pypi-org 或返回标准 HTTP 404 兜底"
         ],
         "soft": [
@@ -173,32 +174,6 @@
         ],
         "probe": [
           "全量 wheel 覆盖率抽样"
-        ]
-      }
-    },
-    {
-      "id": "TC-E2E-USER-SCENARIOS",
-      "name": "vLLM-Ascend 生产全链路用户端到端组合场景",
-      "category": "user-scenario",
-      "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
-      "service_port": 80,
-      "client": ["pip", "uv", "cargo", "apt-get", "dnf", "git"],
-      "workflow": ".github/workflows/e2e-user-scenarios.yml",
-      "engine_scenario": "all",
-      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": "all",
-      "assertions": {
-        "hard": [
-          "OS 包管理器安装通过 (8081 或 8083)",
-          "Python + uv 组合安装通过 (80)",
-          "Rust 工具链与 crate 编译通过 (8082 + 8085)",
-          "Git 代理克隆通过"
-        ],
-        "soft": [
-          "Crate 403 优雅容灾"
-        ],
-        "probe": [
-          "各集群时延与网络吞吐指标"
         ]
       }
     }

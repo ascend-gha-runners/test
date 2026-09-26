@@ -125,7 +125,7 @@ jobs:
           echo "Runner:  ${{ matrix.name }}"
           echo "Arch:    $(uname -m)"
 
-      - name: 1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
+      - name: 【基础功能】1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
         run: |
           CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           echo "=== 请求 sparse index config.json ==="
@@ -147,7 +147,7 @@ jobs:
             exit 1
           fi
 
-      - name: 2. 准备 Rust 工具链
+      - name: 【用户视角场景】2. 准备 Rust 工具链
         env:
           RUSTUP_DIST_SERVER: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup
           RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup/rustup
@@ -161,7 +161,7 @@ jobs:
           /root/.cargo/bin/cargo --version
           /root/.cargo/bin/rustc --version
 
-      - name: 3. 按照文档与项目规范配置 Cargo sparse 镜像源
+      - name: 【用户视角场景】3. 按照文档与项目规范配置 Cargo sparse 镜像源
         run: |
           mkdir -p /root/.cargo
           cat > /root/.cargo/config.toml <<EOF
@@ -174,7 +174,7 @@ jobs:
           echo "=== /root/.cargo/config.toml ==="
           cat /root/.cargo/config.toml
 
-      - name: 4. 真实工程创建并拉取依赖编译（anyhow）
+      - name: 【用户视角场景】4. 真实工程创建并拉取依赖编译运行（anyhow）
         run: |
           workdir="/tmp/cargo_e2e_app"
           rm -rf "$workdir"
@@ -198,7 +198,7 @@ jobs:
           echo "=== 运行编译出的二进制文件 ==="
           ./target/debug/cargo_e2e_app
 
-      - name: 5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
+      - name: 【基础功能】5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
         run: |
           CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           test_pkg_url="${CRATES_ENDPOINT}/api/v1/crates/anyhow/1.0.75/download"
@@ -217,7 +217,7 @@ jobs:
           fi
           echo "✓ crates.io Cache 8085 feature verified successfully on ${{ matrix.cluster }}!"
 
-      - name: 6. 异常场景：404 虚构 crate 请求与回源断言
+      - name: 【基础功能】6. 异常场景：404 虚构 crate 请求与回源断言
         run: |
           echo "=== 探测 8085 端点虚构 crate，验证回源后返回 403/404 ==="
           bogus_crate="e2e-bogus-crate-${GITHUB_RUN_ID}"
@@ -232,7 +232,7 @@ jobs:
             exit 1
           fi
 
-      - name: 7. 异常场景：客户端容灾降级（故障镜像环境下的离线逃生）
+      - name: 【基础功能】7. 异常场景：客户端容灾降级（故障镜像环境下的离线逃生）
         run: |
           echo "=== 验证 cargo 离线逃生能力（在缓存/镜像异常时直接复用已下载依赖）==="
           cd /tmp/cargo_e2e_app

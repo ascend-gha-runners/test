@@ -57,6 +57,11 @@ on:
         required: false
         default: "2.4.0"
         type: string
+      triton_version:
+        description: "triton-ascend 目标版本"
+        required: false
+        default: "3.2.2"
+        type: string
 
 jobs:
   matrix-setup:
@@ -122,16 +127,19 @@ jobs:
     env:
       CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
       INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
+      ASCEND_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/ascend/repos/pypi
       WHL_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/whl/cpu
       PIP_INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
       PIP_TRUSTED_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
       UV_INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/pypi/simple
+      UV_EXTRA_INDEX_URL: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/ascend/repos/pypi http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}/whl/cpu
       UV_INSECURE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_HTTP_TIMEOUT: 120
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
       TORCH_VERSION: ${{ inputs.torch_version || '2.4.0' }}
+      TRITON_VERSION: ${{ inputs.triton_version || '3.2.2' }}
     steps:
       - name: 配置 Git 镜像代理 (加速 GitHub 访问)
         run: |
@@ -149,7 +157,7 @@ jobs:
           echo "Python:  $(python3 --version 2>&1)"
           echo "Pip:     $(python3 -m pip --version 2>&1)"
 
-      - name: 1. 探测内网 PyPI 端点连通性与缓存响应头
+      - name: 【基础功能】1. 探测内网 PyPI 端点连通性与缓存响应头
         run: |
           echo "=== 探测 PyPI Simple 路径与 X-Pypi-Cache 头 ==="
           resp=$(curl -si --max-time 15 "${INDEX_URL}/pip/" | head -n 20)
@@ -161,23 +169,39 @@ jobs:
             echo "ℹ X-Pypi-Cache 未显式返回（走标准缓存代理模式）"
           fi
 
-      - name: 2. 按照文档与 vLLM-Ascend 规范配置 pip
+      - name: 【用户视角场景】2. 按照真实项目规范配置 pip 与 uv 多源镜像
         run: |
-          echo "=== 配置 pip 全局索引指向集群内网缓存 ==="
+          echo "=== 配置 pip 全局索引指向集群内网多源缓存 (PyPI + Ascend + PyTorch WHL) ==="
           python3 -m pip config set global.index-url "${INDEX_URL}"
+          python3 -m pip config set global.extra-index-url "${ASCEND_URL} ${WHL_URL}"
           python3 -m pip config set global.trusted-host "${CACHE_HOST}"
           python3 -m pip config set global.no-cache-dir true
           python3 -m pip config list
 
-      - name: 3. 经内网缓存真实安装依赖（pip install --no-cache-dir）
+      - name: 【用户视角场景】3. 经内网缓存真实安装构建工具 (pip install --no-cache-dir uv uc-manager)
         run: |
-          echo "=== 真实安装 uv 与 uc-manager（模拟真实项目构建环境）==="
-          python3 -m pip install --no-cache-dir uv uc-manager
+          echo "=== 真实安装 uv 与 uc-manager（模拟真实 AI 项目构建环境）==="
+          install_out=$(python3 -m pip install --no-cache-dir uv uc-manager 2>&1)
+          echo "$install_out"
+          if echo "$install_out" | grep -qi "Using cached"; then
+            echo "::error::检测到本地缓存命中 (Using cached)，未能完全绕过本地磁盘缓存!"
+            exit 1
+          fi
           uv --version
           python3 -m pip show uc-manager
           echo "✓ uc-manager and uv installed successfully"
 
-      - name: 4. 验证 PyTorch Wheels 缓存（/whl/cpu 路径真实安装）
+      - name: 【用户视角场景】4. 经内网华为昇腾专属源安装 triton-ascend (vLLM-Ascend 核心依赖)
+        run: |
+          echo "=== 探测 /ascend/repos/pypi 端点 ==="
+          curl -sI --max-time 15 "${ASCEND_URL}/" | head -n 10 || true
+
+          echo "=== 经内网 /ascend/repos/pypi 真实安装 triton-ascend ==="
+          uv pip install --no-cache --force-reinstall --no-deps "triton-ascend==${TRITON_VERSION}"
+          python3 -m pip show triton-ascend
+          echo "✓ triton-ascend installed successfully via internal ascend repo"
+
+      - name: 【用户视角场景】5. 经内网 /whl 路径真实安装 PyTorch CPU (amd64 架构执行，arm64 跳过)
         run: |
           arch=$(uname -m)
           if [ "$arch" != "x86_64" ] && [ "$arch" != "amd64" ]; then
@@ -193,7 +217,39 @@ jobs:
           uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}" --extra-index-url "${INDEX_URL}"
           python3 -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}')"
 
-      - name: 5. 验证 404 回源至 pypi.org 回退机制
+      - name: 【用户视角场景】6. 真实 Python 运行时多模块导入与计算验证 (torch, triton, uc-manager)
+        run: |
+          python3 -c "
+          import uv
+          import uc_manager
+          print('=== 综合运行时自检通过 ===')
+          print('✓ uv loaded:', uv.__version__)
+          print('✓ uc-manager loaded:', uc_manager.__name__)
+
+          try:
+              import triton
+              print('✓ triton loaded:', getattr(triton, '__version__', 'unknown'))
+          except Exception as e:
+              print('ℹ triton runtime note:', e)
+
+          import platform
+          if platform.machine() in ('x86_64', 'amd64'):
+              try:
+                  import torch
+                  print('✓ PyTorch loaded:', torch.__version__)
+                  x = torch.ones(2, 2)
+                  print('✓ PyTorch CPU tensor compute check passed:', x.shape)
+              except Exception as e:
+                  print('::error::PyTorch import or tensor computation failed:', e)
+                  raise
+          else:
+              print('ℹ PyTorch import skipped on arm64')
+
+          print('All Python runtime checks passed!')
+          "
+          python3 -m pip show uv uc-manager triton-ascend || true
+
+      - name: 【基础功能】7. 验证 404 回源至 pypi.org 回退机制
         run: |
           echo "=== 探测上游 404 回退链路 ==="
           bogus="e2e-nonexistent-pkg-${GITHUB_RUN_ID}"
@@ -208,22 +264,7 @@ jobs:
             echo "$resp" | grep -q "404" && echo "✓ 404 兜底机制验证通过"
           fi
 
-      - name: 6. 验证已安装包元数据与导入自检
-        run: |
-          python3 -c "
-          import uv
-          print('=== 综合导入自检通过 ===')
-          print('uv:', uv.__version__)
-          try:
-              import torch
-              print('PyTorch:', torch.__version__)
-          except ImportError:
-              print('PyTorch: skipped on arm64')
-          print('All checks passed!')
-          "
-          python3 -m pip show uv uc-manager || true
-
-      - name: 7. 异常场景：客户端容灾降级（主源故障自动切换至备用内网缓存）
+      - name: 【基础功能】8. 异常场景：客户端容灾降级 (主源故障自动切换至备用内网缓存)
         run: |
           echo "=== 模拟主索引源不可达，验证 pip extra-index-url 自动容灾 ==="
           python3 -m pip install --no-cache-dir \

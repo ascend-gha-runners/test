@@ -122,12 +122,12 @@ jobs:
           echo "Arch:    $(uname -m)"
           cat /etc/os-release | grep PRETTY_NAME || true
 
-      - name: 1. 探测内网 APT 缓存端口（8081）连通性
+      - name: 【基础功能】1. 探测内网 APT 缓存端口（8081）连通性
         run: |
           echo "=== 探测 APT 缓存服务 (8081) ==="
           curl -sI --connect-timeout 5 "http://${CACHE_HOST}:8081" || echo "Note: Port 8081 root index may close or redirect, proceeding to apt repository test"
 
-      - name: 2. 按照文档与 vLLM-Ascend 规范配置 APT 源
+      - name: 【用户视角场景】2. 按照真实项目规范配置 Ubuntu APT 源指向集群内网缓存
         run: |
           echo "=== 替换 /etc/apt/sources.list 指向 8081 缓存 ==="
           sed -Ei "s@(ports|archive).ubuntu.com@${CACHE_HOST}:8081@g" /etc/apt/sources.list
@@ -137,17 +137,17 @@ jobs:
           echo "=== sources.list 校验 ==="
           grep -E "${CACHE_HOST}:8081" /etc/apt/sources.list | head -n 10
 
-      - name: 3. 经内网缓存真实执行 apt-get update
+      - name: 【用户视角场景】3. 经内网缓存真实执行 apt-get update
         run: |
           echo "=== 执行 apt-get update -y ==="
           apt-get update -y
 
-      - name: 4. 经内网缓存真实安装核心编译工具链（vLLM-Ascend 依赖）
+      - name: 【用户视角场景】4. 经内网缓存真实安装核心编译工具链（vLLM-Ascend 依赖）
         run: |
           echo "=== 安装构建依赖 (git, zstd, gcc, cmake) ==="
           apt-get install -y --no-install-recommends git zstd gcc cmake
 
-      - name: 5. 验证已安装工具链及二进制可执行
+      - name: 【用户视角场景】5. 验证已安装工具链及二进制可执行
         run: |
           echo "=== 验证工具链执行与版本 ==="
           git --version
@@ -156,7 +156,7 @@ jobs:
           cmake --version
           echo "✓ APT Cache 8081 feature verified successfully on ${{ matrix.cluster }} (${{ matrix.name }})!"
 
-      - name: 6. 异常场景：404 虚构 deb 包探测与定位异常断言
+      - name: 【基础功能】6. 异常场景：404 虚构 deb 包探测与定位异常断言
         run: |
           echo "=== 探测 8081 端点虚构 deb 包，验证 HTTP 404 返回 ==="
           bogus_deb="e2e-bogus-pkg-${GITHUB_RUN_ID}.deb"
@@ -179,7 +179,7 @@ jobs:
           echo "✓ apt-get 探测到不存在的包并成功捕获异常:"
           grep -E "Unable to locate package|无法定位软件包" /tmp/apt_err || true
 
-      - name: 7. 异常场景：客户端容灾降级（故障源超时跳过与有效源兜底）
+      - name: 【基础功能】7. 异常场景：客户端容灾降级（故障源超时跳过与有效源兜底）
         run: |
           echo "=== 配置包含故障源（127.0.0.1:59999）与有效源的多源列表 ==="
           cat > /etc/apt/sources.list.d/failover-test.list <<EOF

@@ -122,12 +122,12 @@ jobs:
           echo "Arch:    $(uname -m)"
           cat /etc/os-release | grep PRETTY_NAME || true
 
-      - name: 1. 探测内网 YUM 缓存端口（8083）连通性
+      - name: 【基础功能】1. 探测内网 YUM 缓存端口（8083）连通性
         run: |
           echo "=== 探测 YUM 缓存服务 (8083) ==="
           curl -sI --connect-timeout 5 "http://${CACHE_HOST}:8083" || echo "Note: Port 8083 root path probed, continuing to repository test"
 
-      - name: 2. 按照文档与 vLLM-Ascend 规范重写 YUM 源配置
+      - name: 【用户视角场景】2. 按照真实项目规范重写 YUM 源配置指向集群内网缓存
         run: |
           echo "=== 替换 /etc/yum.repos.d/*.repo 为 8083 缓存端口 ==="
           sed -i "s|https://repo.openeuler.org|http://${CACHE_HOST}:8083|g" /etc/yum.repos.d/*.repo || true
@@ -135,25 +135,25 @@ jobs:
           echo "=== 检查修改后的 yum 源 ==="
           grep -E "${CACHE_HOST}:8083" /etc/yum.repos.d/*.repo | head -n 10
 
-      - name: 3. 经内网缓存真实执行 makecache
+      - name: 【用户视角场景】3. 经内网缓存真实执行 makecache
         run: |
           echo "=== 刷新包管理器缓存 ==="
           dnf clean all || yum clean all
           dnf makecache || yum makecache
 
-      - name: 4. 经内网缓存真实安装软件包（vLLM-Ascend 构建依赖）
+      - name: 【用户视角场景】4. 经内网缓存真实安装软件包（vLLM-Ascend 构建依赖 git, zstd）
         run: |
           echo "=== 安装 git 与 zstd ==="
           dnf install -y git zstd || yum install -y git zstd
 
-      - name: 5. 验证已安装工具执行与版本
+      - name: 【用户视角场景】5. 验证已安装工具执行与版本
         run: |
           echo "=== 验证安装结果 ==="
           git --version
           zstd --version
           echo "✓ YUM/DNF Cache 8083 feature verified successfully on ${{ matrix.cluster }} (${{ matrix.name }})!"
 
-      - name: 6. 异常场景：404 虚构 rpm 包探测与安装异常断言
+      - name: 【基础功能】6. 异常场景：404 虚构 rpm 包探测与安装异常断言
         run: |
           echo "=== 探测 8083 端点虚构 rpm 包，验证 HTTP 302/404 返回 ==="
           bogus_rpm="e2e-bogus-pkg-${GITHUB_RUN_ID}.rpm"
@@ -176,7 +176,7 @@ jobs:
           echo "✓ dnf 探测到不存在的包并成功捕获异常:"
           grep -E "No match for argument|未找到匹配|没有可用软件包" /tmp/yum_err || true
 
-      - name: 7. 异常场景：客户端容灾降级（故障 baseurl 自动切换至备用内网地址）
+      - name: 【基础功能】7. 异常场景：客户端容灾降级（故障 baseurl 自动切换至备用内网地址）
         run: |
           echo "=== 配置包含故障地址（127.0.0.1:59999）与有效内网地址的双 baseurl repo ==="
           cat > /etc/yum.repos.d/failover-test.repo <<EOF
