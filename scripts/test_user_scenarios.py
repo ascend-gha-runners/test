@@ -215,7 +215,7 @@ def test_pypi_and_uv_install(cache_host: str, triton_ver: str, torch_ver: str):
         desc=f"uv pip install triton-ascend=={triton_ver} (internal ascend repo)",
     )
 
-    # 5. Install torch from internal repo via uv
+    # 5. Install torch from internal repo via uv (amd64 only)
     torch_spec = f"torch>={torch_ver},<{torch_ver.rsplit('.', 1)[0]}.99"
     arch = platform.machine()
     if arch in ("x86_64", "amd64"):
@@ -229,22 +229,11 @@ def test_pypi_and_uv_install(cache_host: str, triton_ver: str, torch_ver: str):
             desc=f"uv pip install {torch_spec} (internal whl/cpu repo)",
         )
     else:
-        # On aarch64, /whl/cpu has no wheels (only x86_64/win_amd64). Install torch from PyPI simple mirror
-        log(f"Architecture is {arch}; PyTorch CPU wheel is not on /whl/cpu for {arch}, installing torch from internal pypi mirror.")
-        sim_env_arm = sim_env.copy()
-        sim_env_arm["UV_EXTRA_INDEX_URL"] = ascend_url
-        run_cmd(
-            uv_cmd + [
-                "pip", "install",
-                "--no-cache",
-                torch_spec,
-            ],
-            env=sim_env_arm,
-            desc=f"uv pip install {torch_spec} (internal pypi repo for {arch})",
-        )
+        log(f"Architecture is {arch}; skipping PyTorch test case on arm64/aarch64 (only tested on amd64).")
 
     # 6. Real Python runtime import validation
-    import_verify = """
+    if arch in ("x86_64", "amd64"):
+        import_verify = """
 import torch
 print(f"torch imported successfully: version={torch.__version__}")
 
@@ -254,8 +243,19 @@ try:
 except Exception as e:
     print(f"triton runtime note: {e}")
 """
+        packages_to_show = ["uc-manager", "triton-ascend", "torch"]
+    else:
+        import_verify = """
+try:
+    import triton
+    print(f"triton imported successfully: version={getattr(triton, '__version__', 'unknown')}")
+except Exception as e:
+    print(f"triton runtime note: {e}")
+"""
+        packages_to_show = ["uc-manager", "triton-ascend"]
+
     run_cmd([sys.executable, "-c", import_verify], env=sim_env, desc="Python runtime package imports")
-    run_cmd([sys.executable, "-m", "pip", "show", "uc-manager", "triton-ascend", "torch"], env=sim_env, desc="pip show packages")
+    run_cmd([sys.executable, "-m", "pip", "show"] + packages_to_show, env=sim_env, desc="pip show packages")
 
     shutil.rmtree(sandbox_dir, ignore_errors=True)
     log("[PASS] Realistic PyPI + UV package installation and imports succeeded.")

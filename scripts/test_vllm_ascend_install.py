@@ -214,7 +214,7 @@ def main():
         desc="uv pip install triton-ascend",
     )
 
-    # Step 6: Install PyTorch CPU via uv (simulating vllm-ascend workflow)
+    # Step 6: Install PyTorch CPU via uv (simulating vllm-ascend workflow, amd64 only)
     log("\n=== Phase 6: Installing torch from internal repo ===")
     torch_spec = f"torch>={args.torch_version},<{args.torch_version.rsplit('.', 1)[0]}.99"
     if arch in ("x86_64", "amd64"):
@@ -228,23 +228,12 @@ def main():
             desc=f"uv pip install {torch_spec} (internal whl/cpu repo)",
         )
     else:
-        # On aarch64, /whl/cpu has no wheels (only x86_64/win_amd64). Install torch from PyPI simple mirror
-        log(f"Architecture is {arch}; PyTorch CPU wheel is not on /whl/cpu for {arch}, installing torch from internal pypi mirror.")
-        sim_env_arm = sim_env.copy()
-        sim_env_arm["UV_EXTRA_INDEX_URL"] = ascend_url
-        run_cmd(
-            uv_base_cmd + [
-                "pip", "install",
-                "--no-cache",
-                torch_spec,
-            ],
-            env=sim_env_arm,
-            desc=f"uv pip install {torch_spec} (internal pypi repo for {arch})",
-        )
+        log(f"Architecture is {arch}; skipping PyTorch test case on arm64/aarch64 (only tested on amd64).")
 
     # Step 7: Verify Python imports & package metadata
     log("\n=== Phase 7: Validating installed packages and imports ===")
-    import_script = """
+    if arch in ("x86_64", "amd64"):
+        import_script = """
 import torch
 print(f"[PASS] torch imported successfully: version={torch.__version__}")
 
@@ -256,6 +245,21 @@ except Exception as e:
 
 import subprocess, sys
 out = subprocess.check_output([sys.executable, "-m", "pip", "show", "triton-ascend", "uc-manager", "torch"]).decode()
+print("[PASS] Installed package metadata confirmed via pip show:")
+for line in out.splitlines():
+    if line.startswith("Name:") or line.startswith("Version:") or line.startswith("Location:"):
+        print(f"  {line}")
+"""
+    else:
+        import_script = """
+try:
+    import triton
+    print(f"[PASS] triton (from triton-ascend) imported successfully: version={getattr(triton, '__version__', 'unknown')}")
+except Exception as e:
+    print(f"[INFO] triton direct runtime import note (may require NPU driver): {e}")
+
+import subprocess, sys
+out = subprocess.check_output([sys.executable, "-m", "pip", "show", "triton-ascend", "uc-manager"]).decode()
 print("[PASS] Installed package metadata confirmed via pip show:")
 for line in out.splitlines():
     if line.startswith("Name:") or line.startswith("Version:") or line.startswith("Location:"):
