@@ -160,9 +160,14 @@ jobs:
         run: |
           echo "=== 探测 8081 端点虚构 deb 包，验证 HTTP 404 返回 ==="
           bogus_deb="e2e-bogus-pkg-${GITHUB_RUN_ID}.deb"
-          resp=$(curl -si --max-time 15 "http://${{ inputs.cache_host }}:8081/ubuntu/pool/main/b/${bogus_deb}" || true)
+          resp=$(curl -si --max-time 15 "http://${CACHE_HOST}:8081/ubuntu/pool/main/b/${bogus_deb}" || true)
           echo "$resp" | head -n 10
-          echo "$resp" | grep -q "404" && echo "✓ 8081 虚构 deb 请求正常返回 404 Not Found"
+          if echo "$resp" | grep -q "404"; then
+            echo "✓ 8081 虚构 deb 请求正常返回 404 Not Found"
+          else
+            echo "::error::8081 端点未能返回 404 响应"
+            exit 1
+          fi
 
           echo "=== 尝试安装虚构包，验证客户端正确报错退出 ==="
           apt-get install -y --dry-run "e2e-nonexistent-deb-${GITHUB_RUN_ID}" > /tmp/apt_err 2>&1 && installed=true || installed=false

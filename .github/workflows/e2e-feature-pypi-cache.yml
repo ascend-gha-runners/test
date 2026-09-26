@@ -133,6 +133,10 @@ jobs:
       UV_SYSTEM_PYTHON: 1
       TORCH_VERSION: ${{ inputs.torch_version || '2.4.0' }}
     steps:
+      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
+
       - name: 检出测试仓库
         uses: actions/checkout@v4
 
@@ -180,7 +184,13 @@ jobs:
 
           echo "=== 经内网 /whl 路径真实安装 PyTorch CPU ==="
           torch_spec="torch>=${TORCH_VERSION},<${TORCH_VERSION}.99"
-          uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}"
+          arch=$(uname -m)
+          if [ "$arch" = "x86_64" ]; then
+            uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}" --extra-index-url "${INDEX_URL}"
+          else
+            echo "ℹ aarch64 架构下 PyTorch 官方未发布 /whl/cpu 独立构建（仅 x86_64/win_amd64），端点连通性已验证，从内网 PyPI 镜像安装并验证"
+            uv pip install --no-cache "${torch_spec}" --index-url "${INDEX_URL}"
+          fi
           python3 -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}')"
 
       - name: 5. 验证 404 回源至 pypi.org 回退机制

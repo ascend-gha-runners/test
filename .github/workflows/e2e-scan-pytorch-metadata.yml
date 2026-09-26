@@ -141,6 +141,10 @@ jobs:
       SAMPLE_PER_PKG: ${{ inputs.sample_per_pkg || '5' }}
       PACKAGE: ${{ inputs.package || '' }}
     steps:
+      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
+
       - name: 检出测试代码
         uses: actions/checkout@v4
 

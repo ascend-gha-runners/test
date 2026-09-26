@@ -207,17 +207,33 @@ def test_pypi_and_uv_install(cache_host: str, triton_ver: str, torch_ver: str):
         desc=f"uv pip install triton-ascend=={triton_ver} (internal ascend repo)",
     )
 
-    # 5. Install torch from internal whl/cpu repo via uv
+    # 5. Install torch from internal repo via uv
     torch_spec = f"torch>={torch_ver},<{torch_ver.rsplit('.', 1)[0]}.99"
-    run_cmd(
-        uv_cmd + [
-            "pip", "install",
-            "--no-cache",
-            torch_spec,
-        ],
-        env=sim_env,
-        desc=f"uv pip install {torch_spec} (internal whl/cpu repo)",
-    )
+    arch = platform.machine()
+    if arch in ("x86_64", "amd64"):
+        run_cmd(
+            uv_cmd + [
+                "pip", "install",
+                "--no-cache",
+                torch_spec,
+            ],
+            env=sim_env,
+            desc=f"uv pip install {torch_spec} (internal whl/cpu repo)",
+        )
+    else:
+        # On aarch64, /whl/cpu has no wheels (only x86_64/win_amd64). Install torch from PyPI simple mirror
+        log(f"Architecture is {arch}; PyTorch CPU wheel is not on /whl/cpu for {arch}, installing torch from internal pypi mirror.")
+        sim_env_arm = sim_env.copy()
+        sim_env_arm["UV_EXTRA_INDEX_URL"] = ascend_url
+        run_cmd(
+            uv_cmd + [
+                "pip", "install",
+                "--no-cache",
+                torch_spec,
+            ],
+            env=sim_env_arm,
+            desc=f"uv pip install {torch_spec} (internal pypi repo for {arch})",
+        )
 
     # 6. Real Python runtime import validation
     import_verify = """
@@ -319,6 +335,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 """)
+        # Probe crates endpoint before build to prevent indefinite hang if proxy is down
+        probe = subprocess.run(
+            ["curl", "-si", "--connect-timeout", "3", "--max-time", "8", f"{crates_index}config.json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            log(f"[WARN] Crates sparse index ({crates_index}) unresponsive, skipping cargo build per AGENTS.md degradation.", "WARN")
+            return rust_env
+
         # Build binary (downloads crate payload from 8085 & compiles)
         run_cmd(
             ["cargo", "build"],

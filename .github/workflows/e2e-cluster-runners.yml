@@ -115,7 +115,7 @@ jobs:
           echo "Type:          ${{ matrix.type }}"
           echo "Model:         ${{ matrix.model }}"
           echo "Labels:        ${{ toJson(matrix.labels) }}"
-          echo "Hostname:      $(hostname)"
+          echo "Hostname:      $(cat /etc/hostname 2>/dev/null || uname -n)"
           echo "Kernel:        $(uname -r)"
           echo "OS:            $(cat /etc/os-release | grep PRETTY_NAME || true)"
           echo "=========================================="

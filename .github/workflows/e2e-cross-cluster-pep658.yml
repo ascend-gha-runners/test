@@ -118,6 +118,10 @@ jobs:
       INDEX_URL: ${{ inputs.index_url || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu' }}
       SAMPLE_COUNT: ${{ inputs.sample_count || '5' }}
     steps:
+      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
+
       - name: 检出测试代码
         uses: actions/checkout@v4
 
