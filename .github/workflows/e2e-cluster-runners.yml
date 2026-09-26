@@ -78,15 +78,19 @@ jobs:
 
           selected = []
           for r in runners:
-              if target_cluster != "all" and r.get("cluster") != target_cluster:
-                  continue
+              if target_cluster != "all":
+                  if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      continue
               if target_type != "all" and r.get("type") != target_type:
                   continue
               if target_model != "all" and r.get("model", "cpu") != target_model:
                   continue
               selected.append(r)
 
-          if not selected:
+          if not selected and target_cluster != "all":
+              for r in runners:
+                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                      selected.append(r)
               print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type}, model={target_model})", file=sys.stderr)
               sys.exit(1)
 
@@ -115,7 +119,7 @@ jobs:
           echo "Type:          ${{ matrix.type }}"
           echo "Model:         ${{ matrix.model }}"
           echo "Labels:        ${{ toJson(matrix.labels) }}"
-          echo "Hostname:      $(hostname)"
+          echo "Hostname:      $(cat /etc/hostname 2>/dev/null || uname -n)"
           echo "Kernel:        $(uname -r)"
           echo "OS:            $(cat /etc/os-release | grep PRETTY_NAME || true)"
           echo "=========================================="

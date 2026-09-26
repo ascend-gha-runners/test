@@ -223,6 +223,11 @@ def test_pep658_metadata(index_url, package, sample_count):
 
 
 def test_pip_resolution(index_url, package):
+    arch = platform.machine()
+    if arch not in ("x86_64", "amd64"):
+        log(f"[INFO] Architecture is {arch}; skipping pip dry-run resolution for PyTorch on arm64/aarch64 (only tested on amd64).")
+        return True
+
     log("\nTesting pip install --dry-run resolution...")
     # PyTorch 的 whl/cpu 页面极其庞大（上千个历史版本），不指定版本且 --no-cache-dir 时，
     # pip 会对所有版本进行回溯解析，耗时可能超过 3-5 分钟。

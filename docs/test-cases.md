@@ -14,9 +14,8 @@ flowchart TD
         TC_JSON["元数据清单: .github/config/test_cases.json"]
     end
 
-    subgraph L2["第 2 层：测试执行引擎 (Execution Engine)"]
-        ENGINE_PY["脚本引擎: scripts/test_user_scenarios.py"]
-        STANDALONE["独立工具: scripts/pep658_check.py 等"]
+    subgraph L2["第 2 层：测试执行与独立工具 (Execution & Tools)"]
+        STANDALONE["独立工具: scripts/pep658_check.py, scan_pytorch_index_metadata.py 等"]
     end
 
     subgraph L3["第 3 层：动态执行策略与编排 (Orchestration Policy)"]
@@ -45,7 +44,6 @@ flowchart TD
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
-| [`TC-E2E-USER-SCENARIOS`](#tc-e2e-user-scenarios) | vLLM 生产多工具链端到端全链路 | [Platform Features 综合](https://ascend-gha-runners.github.io/docs/feature/) | 80, 8081, 8082, 8083, 8085 | 复合工具链 | `e2e-user-scenarios.yml` | openEuler CANN 8.2 |
 
 ---
 
@@ -74,15 +72,16 @@ flowchart TD
 - **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`
 
 #### 2. 测试目的
-1. 验证 Pod 经 `cache-service.nginx-pypi-cache.svc.cluster.local:80` 能够正常完成 Python 依赖解析；
-2. 验证真实安装过程完全绕过宿主机本地 wheel 缓存（严格禁止 `Using cached`）；
-3. 验证 `/whl/cpu` 专属路径下 PyTorch 真实下载安装与运行时导入；
-4. 验证镜像源未缓存的包（404）能正确通过 `X-Cache-Tier` 回源至 `pypi.org`。
+1. **基础功能**：验证 Pod 经 `cache-service.nginx-pypi-cache.svc.cluster.local:80` 能够正常完成 Python 依赖解析与 404 回源至 `pypi.org`；
+2. **用户视角场景**：按照真实大型 AI 工程（vLLM-Ascend）规范配置多源（PyPI + Ascend 专属源 + PyTorch /whl/cpu），完全绕过宿主机本地 wheel 缓存（严格禁止 `Using cached`）；
+3. **用户视角场景**：真实安装昇腾专属依赖 `triton-ascend`，以及安装 PyTorch CPU（仅在 amd64 节点执行，arm64 自动跳过）；
+4. **运行时自检**：真实在 Python 运行时中执行 `import torch, triton, uc_manager` 并完成张量计算验证。
 
 #### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend）
 ```bash
-# 方式 A：通过 pip config 配置
+# 方式 A：通过 pip config 配置多源与无本地缓存
 pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+pip config set global.extra-index-url "http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
 pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
 pip config set global.no-cache-dir true
 
@@ -90,22 +89,26 @@ pip config set global.no-cache-dir true
 export PIP_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
 export PIP_TRUSTED_HOST="cache-service.nginx-pypi-cache.svc.cluster.local"
 export UV_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+export UV_EXTRA_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu"
 export UV_INSECURE_HOST="cache-service.nginx-pypi-cache.svc.cluster.local"
 export UV_INDEX_STRATEGY="unsafe-best-match"
 export UV_NO_CACHE=1
 export UV_SYSTEM_PYTHON=1
 
-# 真实安装业务依赖
+# 真实安装构建工具与业务依赖
 pip install --no-cache-dir uv uc-manager
 
-# PyTorch 经 /whl 路径安装
-pip install torch --index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+# 昇腾专属源安装 triton-ascend
+uv pip install --no-cache --force-reinstall --no-deps triton-ascend==3.2.2
+
+# PyTorch 经 /whl 路径安装 (仅 amd64 架构)
+uv pip install --no-cache "torch>=2.4.0,<2.4.99"
 ```
 
 #### 4. 判定标准
-- **硬断言**：`pip install --no-cache-dir uv uc-manager` 返回码 0；输出中无 `Using cached`；`python -c "import torch; print(torch.__version__)"` 执行成功；
+- **硬断言**：`pip install --no-cache-dir uv uc-manager` 返回码 0；输出中无 `Using cached`；`triton-ascend` 成功安装并能正常 `import triton`；amd64 节点上 PyTorch 成功安装并完成 `torch.ones(2, 2)` 张量计算；
 - **软断言**：请求 `/pypi/simple/six/` 响应包含 `X-Pypi-Cache` 且在二次请求呈现 HIT；
-- **探针**：请求虚构包 `e2e-nonexistent-pkg-${GITHUB_RUN_ID}` 探测 `X-Cache-Tier: pypi-org`；
+- **探针**：请求虚构包 `e2e-nonexistent-pkg-${GITHUB_RUN_ID}` 探测 `X-Cache-Tier: pypi-org` 或 404；
 - **异常与容灾断言**：请求不存在的包探测 404 回退链路；主索引源配置故障地址（如 127.0.0.1:59999）时，通过 `--extra-index-url` 能够在连接失败后秒级自动 fallback 成功安装。
 
 ---
@@ -301,29 +304,11 @@ cargo build
 
 ---
 
-### TC-E2E-USER-SCENARIOS
-
-#### 1. 基本信息
-- **用例 ID**：`TC-E2E-USER-SCENARIOS`
-- **名称**：vLLM 生产多工具链端到端全链路场景
-- **关联工作流**：`.github/workflows/e2e-user-scenarios.yml`
-- **底层驱动脚本**：[`scripts/test_user_scenarios.py`](file:///home/lcr/gha-test/scripts/test_user_scenarios.py)
-
-#### 2. 测试目的
-串联 OS 包管理器、Python+uv 构建安装、Rust 工具链与 Crates 编译、Git 镜像代理全部链路，模拟生产作业流水线在真实集群节点的端到端执行。
-
-#### 3. 判定标准
-- **硬断言**：各组件全流程执行成功，返回码 0；
-- **软断言**：Crate 403 容灾降级；
-- **探针**：网络延迟与出口 IP 诊断。
-
----
-
 ## 五、用例执行与复现操作指南
 
 ### 1. GitHub Actions 触发 (远程矩阵执行)
 ```bash
-# 执行全部 5 大 Platform Features
+# 执行全部 5 大 Platform Features（均已内置“基础功能 + 用户视角场景”全流程）
 gh workflow run e2e-feature-pypi-cache.yml   --repo ascend-gha-runners/test
 gh workflow run e2e-feature-apt-cache.yml    --repo ascend-gha-runners/test
 gh workflow run e2e-feature-rustup-cache.yml --repo ascend-gha-runners/test
@@ -337,15 +322,7 @@ gh workflow run e2e-feature-pypi-cache.yml -f cluster=cn12-001 -f runner_type=np
 gh workflow run e2e-cluster-runners.yml --repo ascend-gha-runners/test
 ```
 
-### 2. 容器与本地调试复现 (脱离 GHA 上下文)
-```bash
-# 在集群内任意 Pod 或本地连通内网的环境中执行引擎脚本
-python3 scripts/test_user_scenarios.py --cache-host "cache-service.nginx-pypi-cache.svc.cluster.local" --scenarios "pypi"
-python3 scripts/test_user_scenarios.py --cache-host "cache-service.nginx-pypi-cache.svc.cluster.local" --scenarios "apt"
-python3 scripts/test_user_scenarios.py --cache-host "cache-service.nginx-pypi-cache.svc.cluster.local" --scenarios "yum"
-python3 scripts/test_user_scenarios.py --cache-host "cache-service.nginx-pypi-cache.svc.cluster.local" --scenarios "rustup"
-python3 scripts/test_user_scenarios.py --cache-host "cache-service.nginx-pypi-cache.svc.cluster.local" --scenarios "crates"
-
-# 全量组合场景执行
-python3 scripts/test_user_scenarios.py --scenarios "all"
-```
+### 2. 双重视角设计规范 (Dual-Perspective Design)
+每个平台特性测试工作流均已闭环实现：
+1. **基础功能**：端点探测、缓存响应头（MISS/HIT）、协议级 404 回退机制及多源容灾降级；
+2. **用户视角场景**：真实模拟生产 AI 项目（如 `vllm-ascend`）配置镜像源，强制 `--no-cache-dir` 绕过本地缓存，真实安装工具链、下载编译核心依赖（`triton-ascend`、`torch`、`anyhow` 等）并执行 Python/Rust 计算程序完成运行时验证。

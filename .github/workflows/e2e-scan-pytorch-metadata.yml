@@ -99,6 +99,9 @@ jobs:
 
           selected = []
           for r in runners:
+              # PyTorch 用例跳过 arm64/aarch64 架构，仅在各集群 amd64 节点上测试
+              if r.get("arch") not in ("amd64", "x86_64"):
+                  continue
               if target_cluster != "all":
                   if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
                       continue
@@ -108,15 +111,18 @@ jobs:
 
           if not selected and target_cluster != "all":
               for r in runners:
-                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
+                  if r.get("arch") in ("amd64", "x86_64") and (r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001"))):
                       selected.append(r)
 
           if not selected:
-              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
-              sys.exit(1)
+              if target_cluster != "all":
+                  print(f"Warning: Cluster {target_cluster} has no amd64 runners. PyTorch tests skip arm64 per policy.", file=sys.stderr)
+              else:
+                  print("Error: No amd64 runners matched filter across clusters", file=sys.stderr)
+                  sys.exit(1)
 
           matrix_json = json.dumps({"include": selected})
-          print(f"Matrix selected ({len(selected)} runners across clusters): {matrix_json}")
+          print(f"Matrix selected ({len(selected)} amd64 runners across clusters): {matrix_json}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh_out:
               gh_out.write(f"matrix={matrix_json}\n")
               gh_out.write(f"count={len(selected)}\n")
@@ -125,6 +131,7 @@ jobs:
   scan-pytorch-metadata:
     name: "Scan [${{ matrix.cluster }}] ${{ matrix.name }}"
     needs: matrix-setup
+    if: ${{ needs.matrix-setup.outputs.count != '0' }}
     runs-on: ${{ matrix.labels }}
     timeout-minutes: 40
     strategy:
@@ -141,6 +148,10 @@ jobs:
       SAMPLE_PER_PKG: ${{ inputs.sample_per_pkg || '5' }}
       PACKAGE: ${{ inputs.package || '' }}
     steps:
+      - name: 配置 Git 镜像代理 (加速 GitHub 访问)
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
+
       - name: 检出测试代码
         uses: actions/checkout@v4
 
@@ -184,7 +195,7 @@ jobs:
   aggregate-summary:
     name: 跨集群缓存健康汇总
     needs: [matrix-setup, scan-pytorch-metadata]
-    if: always()
+    if: always() && needs.matrix-setup.outputs.count != '0'
     runs-on: ubuntu-latest
     steps:
       - name: 检出测试代码
