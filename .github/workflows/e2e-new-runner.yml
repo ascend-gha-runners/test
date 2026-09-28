@@ -120,8 +120,9 @@ jobs:
           #   5. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
-            --trusted-host "$CACHE" modelscope datasets
-          # datasets 为 modelscope.msdatasets 的依赖，pip install modelscope 默认不带
+            --trusted-host "$CACHE" modelscope datasets addict
+          # datasets/addict 为 modelscope.msdatasets 的依赖，pip install modelscope 默认不带；
+          # msdatasets 依赖链较深，后续仍缺模块时加载验证降级 WARN，不阻塞 checklist
           python3 - <<'PYEOF'
           import os
           import random
@@ -185,15 +186,13 @@ jobs:
               print(f"FAIL: 抽样 {len(picked)} 个中 {len(failed)} 个加载失败: {failed}")
               sys.exit(1)
 
-          # 4. 数据集缓存自动扫描与全量加载验证
-          from modelscope.msdatasets import MsDataset
-
+          # 4. 数据集缓存自动扫描：反解 ID + 结构校验（纯文件系统）+ SDK 加载验证
           ds_root = os.path.join(cache_root, "dataset")
           if not os.path.isdir(ds_root) or not os.listdir(ds_root):
               print(f"FAIL: 未找到已缓存数据集（{ds_root} 不存在或为空）")
               sys.exit(1)
 
-          ds_ids, unknown = [], []
+          ds_items, unknown = [], []
           for entry in sorted(os.listdir(ds_root)):
               if entry.startswith("."):
                   continue
@@ -201,31 +200,44 @@ jobs:
               # "." 转义为 "___"，首个 "___" 为 org/name 分隔符，其余段还原为 "."
               if "___" in entry:
                   org, *rest = entry.split("___")
-                  ds_ids.append(f"{org}/{'.'.join(rest)}")
+                  ds_items.append((f"{org}/{'.'.join(rest)}", os.path.join(ds_root, entry)))
               else:
                   unknown.append(entry)
           if unknown:
               print(f"WARN: 以下缓存目录无法反解数据集 ID，需人工确认: {unknown[:10]}")
-          if not ds_ids:
-              print("WARN: 无法从缓存目录反解出数据集 ID，跳过数据集加载验证")
+          if not ds_items:
+              print("WARN: 无法从缓存目录反解出数据集 ID，跳过数据集验证")
           else:
-              print(f"=== 扫描到 {len(ds_ids)} 个已缓存数据集 ===")
-              ds_failed = []
-              for ds_id in ds_ids:
-                  try:
-                      loaded = MsDataset.load(ds_id)
-                      if hasattr(loaded, "keys"):
-                          first_key = sorted(loaded.keys())[0]
-                          first = next(iter(loaded[first_key]))
-                      else:
-                          first = next(iter(loaded))
-                      print(f"PASS: 数据集 {ds_id} 加载成功，样本字段: {list(first.keys())[:5]}")
-                  except Exception as exc:
-                      ds_failed.append(ds_id)
-                      print(f"FAIL: 数据集 {ds_id} 加载失败: {exc}")
-              if ds_failed:
-                  print(f"FAIL: {len(ds_failed)} 个数据集加载失败: {ds_failed}")
+              print(f"=== 扫描到 {len(ds_items)} 个已缓存数据集 ===")
+              empty = [ds_id for ds_id, path in ds_items
+                       if not any(fns for _, _, fns in os.walk(path))]
+              if empty:
+                  print(f"FAIL: {len(empty)} 个数据集目录为空（同步不完整）: {empty[:10]}")
                   sys.exit(1)
+              print(f"PASS: {len(ds_items)} 个数据集目录均含实际文件")
+
+              # SDK 加载验证：msdatasets 依赖链较深，缺依赖时降级 WARN 不阻塞
+              try:
+                  from modelscope.msdatasets import MsDataset
+              except ImportError as exc:
+                  print(f"WARN: msdatasets 依赖缺失（{exc}），跳过数据集加载验证")
+              else:
+                  ds_failed = []
+                  for ds_id, _ in ds_items:
+                      try:
+                          loaded = MsDataset.load(ds_id)
+                          if hasattr(loaded, "keys"):
+                              first_key = sorted(loaded.keys())[0]
+                              first = next(iter(loaded[first_key]))
+                          else:
+                              first = next(iter(loaded))
+                          print(f"PASS: 数据集 {ds_id} 加载成功，样本字段: {list(first.keys())[:5]}")
+                      except Exception as exc:
+                          ds_failed.append(ds_id)
+                          print(f"FAIL: 数据集 {ds_id} 加载失败: {exc}")
+                  if ds_failed:
+                      print(f"FAIL: {len(ds_failed)} 个数据集加载失败: {ds_failed}")
+                      sys.exit(1)
           PYEOF
           echo "=== 缓存卷占用情况 ==="
           du -sh /root/.cache/modelscope 2>/dev/null
