@@ -220,9 +220,10 @@ jobs:
       - name: 【用户视角场景】6. 真实 Python 运行时多模块导入与计算验证 (torch, triton, uc-manager)
         run: |
           python3 -c "
-          import uv
+          import uv, importlib.metadata
           print('=== 综合运行时自检通过 ===')
-          print('✓ uv loaded:', uv.__version__)
+          print('✓ uv binary:', uv.find_uv_bin())
+          print('✓ uv package version:', importlib.metadata.version('uv'))
 
           try:
               import triton
