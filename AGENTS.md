@@ -1,91 +1,95 @@
-# AGENTS.md — ascend-gha-runners/test 开发指导
+# AGENTS.md — ascend-gha-runners/test 架构地图与开发指导
 
-本仓库承载 **runner / 集群基础设施的端到端(e2e)测试**。任何
-[ascend-ci-deployment](https://github.com/opensourceways/ascend-ci-deployment)
-的基础设施变更(runner、nginx cache、调度、存储等)**合入前必须先在这里
-dispatch 对应 e2e,全绿后再合入**。
+本仓库承载 **昇腾 GHA Runner 与集群基础设施的端到端 (E2E) 测试**。
+任何 [ascend-ci-deployment](https://github.com/opensourceways/ascend-ci-deployment) 的基础设施变更（Runner 镜像、Nginx 缓存、调度标签、共享存储等）**合入前必须先在此处 dispatch 对应 E2E，全绿后方可合入**。
 
-## 两层测试体系
+---
 
-| 层 | 位置 | 验证什么 |
+## 1. 仓库导航地图 (Repository Index Map)
+
+为支持 Agent **渐进式加载 (Progressive Loading)**，本仓库信息遵循“全局索引地图 -> 专项规约与决策 -> 底层配置与实现”的三层结构。请按当前任务的关注点跳转查阅：
+
+| 模块 / 路径 | 核心定位与职责 | 何时需要读取 |
 |---|---|---|
-| **e2e(本仓库)** | `.github/workflows/e2e-*.yml` | 真实集群上端到端:调度、算力、缓存链路、网络 |
-| **单测(ascend-ci-deployment)** | `tests/`(pytest + shell) | 配置文件语义(nginx conf 回退链、YAML 规范、ArgoCD lint),CI 每次 PR 自动跑 |
+| [`docs/adr/`](docs/adr/) | **架构决策记录 (ADR)**<br>• 决策索引: [`docs/adr/README.md`](docs/adr/README.md)<br>• 写作约束: [`docs/adr/AGENTS.md`](docs/adr/AGENTS.md) | **方案变化、选型变更、新增机制时必读**（合入前必须提交对应 ADR） |
+| [`docs/test-cases.md`](docs/test-cases.md) | **测试用例规约详情 (Specification)**<br>• 元数据清单: [`.github/config/test_cases.json`](.github/config/test_cases.json) | 需要了解具体用例的目的、生产调用方式、三级断言标准时 |
+| [`.github/config/runners.json`](.github/config/runners.json) | **13 集群 Runner 拓扑与标签清单** | 调试调度策略、派生测试矩阵、配置双标签 `[型号, 集群名]` 时 |
+| [`.github/workflows/`](.github/workflows/) | **E2E 编排工作流清单** | 编写、调试或修改具体 GitHub Actions 流程时 |
+| [`scripts/`](scripts/) | **测试支撑与看板数据生成脚本** | 修改 PEP 658 校验器、元数据扫描器或测试质量大盘生成逻辑时 |
 
-e2e 发现的问题先定位根因,配置类修复落到 ascend-ci-deployment(单测同步补),
-再回到本仓库回归。
+---
 
-## 架构决策记录 (ADR) 规范
+## 2. 任务快速路由 (Task Routing)
 
-本仓库的所有架构演进与重大设计决策集中在 [`docs/adr/`](docs/adr/)（详见 [ADR 索引](docs/adr/README.md) 与 [写作规则](docs/adr/AGENTS.md)）维护。
+Agent 在执行不同任务时，请依照以下路径逐步加载上下文：
 
-**硬性约束**：在进行以下变更时，**必须在合入前先撰写对应的 ADR 并随 PR 一同提交**：
-1. **方案变化**：测试用例的聚合/拆分策略、多集群调度与矩阵生成重构、测试流水线生命周期调整；
-2. **选型变化**：测试驱动工具/库选型、包管理器/编译器约束、基准容器镜像变更；
-3. **新增机制**：跨架构兼容/优雅跳过策略、响应头断言标准、容灾降级与故障逃生机制。
+### 场景 A：方案变化 / 技术选型 / 新增机制
+- **核心约束**：**严禁未经 ADR 直接合入重大结构与策略变更**。
+- **行动指引**：
+  1. 阅读 [`docs/adr/AGENTS.md`](docs/adr/AGENTS.md) 明确 ADR 格式与生命周期；
+  2. 查阅 [`docs/adr/README.md`](docs/adr/README.md) 了解现有决策（如 [ADR-0001 双重视角闭环](docs/adr/0001-平台特性用例采用基础功能与用户场景双重视角闭环.md) 与 [ADR-0002 PyTorch 架构跳过](docs/adr/0002-pytorch-cpu用例仅限amd64架构测试并在arm64优雅跳过.md)）；
+  3. 撰写 `docs/adr/NNNN-<标题>.md`，随 PR 一并提交。
 
-## 新增 e2e 用例规范
+### 场景 B：新增或修改平台特性用例 (Platform Features)
+- **核心约束**：**采用“双重视角闭环”，严禁将基础功能与真实用户场景割裂为独立用例**（参见 [ADR-0001](docs/adr/0001-平台特性用例采用基础功能与用户场景双重视角闭环.md)）。
+- **行动指引**：
+  1. 查阅 [`docs/test-cases.md`](docs/test-cases.md) 获取特性规约；
+  2. 工作流命名为 `e2e-feature-<能力>.yml`；
+  3. 工作流内必须显式组织两类步骤：
+     - `【基础功能】`：端口连通、响应头（MISS/HIT）、404 回退（`X-Cache-Tier`）、容灾降级；
+     - `【用户视角场景】`：真实工程镜像源配置、强制 `--no-cache-dir` 绕过本地缓存、真实编译/安装专有核心依赖、Python/Rust 运行时自检。
+  4. 同步登记到 [`.github/config/test_cases.json`](.github/config/test_cases.json)。
 
-### 命名与触发
-- 文件名:`e2e-<集群>-<能力>.yml`,如 `e2e-gy006-nginx-cache.yml`
-- 触发:`on: workflow_dispatch`(新文件必须先进 main 才能被 dispatch;
-  main 无分支保护,小改动可直接推,正式变更走 PR)
-- 只测明确目标,一个 workflow 一类能力,steps 内按断言分组
+### 场景 C：跨集群调度与架构适配
+- **行动指引**：
+  1. 查阅 [`.github/config/runners.json`](.github/config/runners.json) 获取集群 Runner 的 `labels` 与 `arch`（amd64 / aarch64）；
+  2. **PyTorch 用例铁律**：PyTorch `/whl/cpu` 仅支持 amd64，在 arm64 节点必须优雅跳过（参见 [ADR-0002](docs/adr/0002-pytorch-cpu用例仅限amd64架构测试并在arm64优雅跳过.md)），严禁因上游缺失而误报挂掉；
+  3. 调度目标标签规范：`runs-on: ["<能力标签>", "<集群标签>"]`（AND 逻辑钉死目标集群）。
 
-### 目标 runner 写法
-```yaml
-runs-on: ["<能力标签>", "gy-006"]   # 多标签 AND 匹配;gy-006 用于钉死集群
-timeout-minutes: 90                  # 资源 Pending 时兜底,8 卡等稀缺资源适当放宽
-container:
-  image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
-```
+---
 
-### 断言分级(必须显式声明)
-1. **硬断言**(exit 1):能力本身,如 NPU 卡数、缓存头存在、回退层级
-2. **软断言**(阈值):有合理波动的值,如 CPU/内存配额按 90% 断言,并在
-   WARN 时说明原因
-3. **信息项**(`continue-on-error: true` 或 WARN-skip):探针类,如 yum 源
-   格式差异;**绝不把环境差异伪装成用例失败**
+## 3. 核心设计原则与断言标准
 
-### 确定性断言模式(缓存/代理类用例的标准做法)
-客户端无法从状态码区分"哪个上游服务了请求",必须用响应头:
-- `X-Cache-Tier`:pypi/crates 回源层级(huaweicloud/ustc/nju/pypi-org/crates-official)
-- `X-Crates-Cache` / `X-Rustup-Cache` / `X-Pypi-Cache`:MISS→HIT 命中验证
-- 头带 `always`,**最终 404/302 上也会出现**——bogus 资源 + 头 = 确定性回退证明
-- 头未部署时(上游 PR 未合入):**WARN 跳过并在输出里注明 PR 编号**,不要 FAIL
+### 两层测试分工体系
+- **本仓库 (E2E)**：真实集群上端到端验证（调度、算力、缓存链路、网络、存储）；
+- **上游仓库 (单测)**：[`ascend-ci-deployment`](https://github.com/opensourceways/ascend-ci-deployment) 验证静态配置语义（Nginx 回退链、ArgoCD lint），CI 每次 PR 自动运行。
 
-### 已踩过的坑(写用例前先读)
-1. **共享存储写测的文件名必须按 pod 唯一**(`$(hostname)` 不可用——CANN 镜像
-   没有 hostname 命令;用 `${GITHUB_RUN_ID}-$$`):多 job 共享同一 SFS 目录,
-   固定名会互相 touch/rm 踩踏
-2. **CANN 镜像缺常用命令**:`hostname` 不存在;依赖前先 `command -v` 验证
-3. **响应头命名避免撞 CDN**:Fastly 会透传自己的 `X-Served-By`,用
-   `X-Cache-Tier` 这类带命名空间的名字
-4. **sub_filter 类断言要求响应带正确 Content-Type**(application/json),
-   mock/上游缺该头时 sub_filter 不生效
-5. **python 内联在 bash 单引号里时不能用单引号字符**(转义或改双引号)
-6. cargo sparse 协议要求 cargo ≥ 1.68
+### 断言分级标准 (必须显式声明)
+1. **硬断言 (exit 1 阻断)**：核心能力本身（如 NPU 卡数、缓存头存在、依赖安装成功、二进制正确运行）；
+2. **软断言 (阈值容差 / WARN)**：有合理波动的指标（如 CPU/内存配额达到 90%、首次 MISS 二次 HIT）；
+3. **信息项 (`continue-on-error` 或 WARN-skip)**：探针类检查。**绝不把环境差异伪装成用例失败**。
 
-### 与 ascend-ci-deployment 的联动
-- 基础设施 PR 描述里注明"合入前需跑 e2e:xxx"
-- e2e 中引用上游 PR 编号(如 `ascend-ci-deployment#1672`)说明依赖关系
-- 上游功能合入但未同步到集群(ArgoCD 延迟/静态 checksum)时,e2e 走降级
-  而非失败,等部署完成后自然转硬断言
+### 确定性断言模式
+验证缓存代理时，不得仅依赖 HTTP 状态码，必须断言关键响应头：
+- `X-Cache-Tier`: 回源层级（`huaweicloud` / `ustc` / `nju` / `pypi-org` / `crates-official`）；
+- `X-Crates-Cache` / `X-Rustup-Cache` / `X-Pypi-Cache`: 缓存命中状态；
+- 头带 `always` 规则：在虚构资源（如 404）上依然会注入，构成了确定性的“回退链路存活”证明。
 
-## 平台特性测试用例 (Platform Features)
+---
 
-对应官方文档 [Platform Features](https://ascend-gha-runners.github.io/docs/feature/)，每个特性均有独立 E2E 测试用例，采用真实项目（如 `vllm-project/vllm-ascend`）的实际使用方式，并基于 `.github/config/runners.json` 支持全 13 集群矩阵调度：
+## 4. 关键避坑基线 (Gotchas)
 
-| 特性 | 工作流文件 | 代理端口 / 协议 | 覆盖范围 / 关键断言 |
-|---|---|---|---|
-| **PyPI Cache** | `e2e-feature-pypi-cache.yml` | Port 80 (HTTP) | pip/uv 真实安装、`/whl/cpu` 真实安装 PyTorch、404 回源至 pypi.org |
-| **APT Cache** | `e2e-feature-apt-cache.yml` | Port 8081 (HTTP) | Ubuntu 真实 `apt-get update` & 安装构建依赖 `git`/`zstd`/`gcc`/`cmake` |
-| **Rust / rustup** | `e2e-feature-rustup-cache.yml` | Port 8082 (HTTP) | rustup 极简稳定工具链真实下载安装与 `rustc`/`cargo` 可执行验证 |
-| **YUM / DNF Cache** | `e2e-feature-yum-cache.yml` | Port 8083 (HTTP) | openEuler 真实 `dnf/yum makecache` & 安装构建依赖 `git`/`zstd` |
-| **crates.io Cache**| `e2e-feature-crates-cache.yml` | Port 8085 (HTTP) | Cargo sparse 镜像、真实工程拉取 `anyhow` 依赖并编译执行、MISS→HIT 缓存头 |
+编写或审查 Workflow 脚本前必须核对以下关键陷阱：
+1. **容器内缺少 `hostname` 命令**：CANN 基础镜像无 `hostname`，获取节点名必须用 `$(cat /etc/hostname 2>/dev/null || uname -n)`；
+2. **共享存储并发写冲突**：共享 SFS 目录下的测试文件必须按 pod 唯一（推荐 `${GITHUB_RUN_ID}-$$`），禁止固定文件名；
+3. **国内网络直连 GitHub 超时**：IDC 容器内检出或拉取代码时，必须注入 `gh-proxy.test.osinfra.cn` 镜像代理；
+4. **Schedule 定时触发无 inputs 参数**：定时任务中 `${{ inputs.xxx }}` 会渲染为空字符串，引用必须配置 fallback 环境变量（如 `${CACHE_HOST}`）；
+5. **Upstream 配置未同步时走降级**：若上游 PR 已合入但 ArgoCD 尚未同步至集群，E2E 应当输出 Warning 降级跳过（注明 PR 编号），不得粗暴判负。
 
-## 运行方式
+---
 
+## 5. 工作流清单与运行入口
+
+### 平台特性测试工作流 (Platform Features)
+| 工作流 | 代理端口 / 协议 | 覆盖范围 / 关键断言 |
+|---|---|---|
+| [`e2e-feature-pypi-cache.yml`](.github/workflows/e2e-feature-pypi-cache.yml) | Port 80 (HTTP) | pip/uv 多源配置、triton-ascend 安装、PyTorch (amd64)、运行时 import、404 回源 |
+| [`e2e-feature-apt-cache.yml`](.github/workflows/e2e-feature-apt-cache.yml) | Port 8081 (HTTP) | Ubuntu 真实 `apt-get update` & 安装构建依赖 `git`/`zstd`/`gcc`/`cmake` |
+| [`e2e-feature-rustup-cache.yml`](.github/workflows/e2e-feature-rustup-cache.yml) | Port 8082 (HTTP) | rustup 极简稳定工具链真实下载安装与 `rustc`/`cargo` 可执行验证 |
+| [`e2e-feature-yum-cache.yml`](.github/workflows/e2e-feature-yum-cache.yml) | Port 8083 (HTTP) | openEuler 真实 `dnf/yum makecache` & 安装构建依赖 `git`/`zstd` |
+| [`e2e-feature-crates-cache.yml`](.github/workflows/e2e-feature-crates-cache.yml) | Port 8085 (HTTP) | Cargo sparse 镜像、真实工程拉取 `anyhow` 依赖并编译执行、MISS→HIT 缓存头 |
+
+### 常用运行命令
 ```bash
 # 平台各特性独立验证
 gh workflow run e2e-feature-pypi-cache.yml   --repo ascend-gha-runners/test
@@ -101,17 +105,8 @@ gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
 gh run watch <run-id> --repo ascend-gha-runners/test
-
-# 手动触发测试报告页面数据刷新 (日常无需执行，测试完成后自动触发)
-gh workflow run update-report-pages.yml     --repo ascend-gha-runners/test
 ```
 
-## 测试质量报告看板 (GitHub Pages)
-- 看板访问: https://ascend-gha-runners.github.io/test/
-- 触发方式: 任意 `e2e-*` 工作流 completed 时由 `update-report-pages.yml` 自动触发。
-- 数据持久化: 增量测试流水保存在 `gh-pages` 分支的 `data/history.json`，不会因 CI 日志过期而丢失。
-
-## 历史 workflow
-`test_npu.yaml` / `test-action-path.yml` / `test_secret_upload.yml` 为早期
-手工测试,保留作参考,新用例不要模仿其结构。
-
+### 测试质量看板 (GitHub Pages)
+- **看板访问**：[https://ascend-gha-runners.github.io/test/](https://ascend-gha-runners.github.io/test/)
+- **数据源与刷新**：由 [`update-report-pages.yml`](.github/workflows/update-report-pages.yml) 监听各 E2E 工作流完成事件，数据持久化保存在 `gh-pages` 分支的 `data/history.json`。
