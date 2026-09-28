@@ -2,13 +2,14 @@ name: e2e-new-runner
 # 新 runner 接入 checklist：job pod 到集群内各基础设施服务的连通性
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
 # 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085, 可选)
-#       / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
+#       / 模型权重缓存(modelscope 默认路径) / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
 #       / squid 代理(3128)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
 #   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
+#   模型/数据集 ID：-f ms-model=<org>/<model> -f ms-dataset=<org>/<dataset>
 #   amd64 接入：-f container-image=<amd64 镜像>
 #
 # 注意：runner-label 写错不会报错，job 会一直 Pending 排队直到 timeout；
@@ -29,6 +30,16 @@ on:
         description: 'crates.io 缓存勾选：断言 sparse index dl 改写与下载缓存头（非所有集群部署）'
         type: boolean
         default: false
+      ms-model:
+        description: 'ModelScope 模型 ID（真实下载并断言落盘默认缓存路径）'
+        required: false
+        default: 'damo/nlp_corom_sentence-embedding_chinese-base'
+        type: string
+      ms-dataset:
+        description: 'ModelScope 数据集 ID（真实加载校验）'
+        required: false
+        default: 'modelscope/squad'
+        type: string
       container-image:
         description: 'job 容器镜像（amd64 runner 接入时传 amd64 镜像）'
         required: true
@@ -108,6 +119,41 @@ jobs:
             [ "$h2" = "HIT" ] || { echo "FAIL: MISS 后未 HIT"; exit 1; }
           fi
           echo "PASS: crates 缓存链路正常"
+
+      - name: 模型权重缓存（ModelScope 默认路径真实下载）
+        env:
+          MS_MODEL: ${{ inputs.ms-model || 'damo/nlp_corom_sentence-embedding_chinese-base' }}
+          MS_DATASET: ${{ inputs.ms-dataset || 'modelscope/squad' }}
+        run: |
+          # SFS 共享缓存卷挂载于 /root/.cache，ModelScope 默认缓存路径
+          # ~/.cache/modelscope 即落在其上；不设 MODELSCOPE_CACHE，走默认路径。
+          # 断言：模型真实下载并落盘默认路径、数据集真实加载。
+          python3 -m pip install --no-cache-dir -q \
+            --index-url "http://$CACHE/pypi/simple" \
+            --trusted-host "$CACHE" modelscope
+          python3 - <<'PYEOF'
+          import os
+          from modelscope import snapshot_download
+
+          model = os.environ["MS_MODEL"]
+          path = snapshot_download(model)
+          cache_root = os.path.expanduser("~/.cache/modelscope")
+          assert path.startswith(cache_root + os.sep), f"FAIL: 模型未落盘默认路径 {cache_root}（实际 {path}）"
+          size_mb = sum(
+              os.path.getsize(os.path.join(dp, f))
+              for dp, _, fns in os.walk(path) for f in fns
+          ) / 1024 / 1024
+          print(f"PASS: 模型 {model} -> {path} ({size_mb:.1f} MB)")
+
+          from modelscope.msdatasets import MsDataset
+          dataset = os.environ["MS_DATASET"]
+          ds = MsDataset.load(dataset, split="train")
+          first = next(iter(ds))
+          print(f"PASS: 数据集 {dataset} 加载成功，样本字段: {list(first.keys())[:5]}")
+          PYEOF
+          echo "=== 默认缓存路径落盘情况 ==="
+          du -sh /root/.cache/modelscope 2>/dev/null
+          echo "PASS: 模型权重缓存链路正常"
 
       - name: 包缓存端口探针（8081 deb / 8082 rustup / 8084 go）
         run: |
