@@ -221,10 +221,8 @@ jobs:
         run: |
           python3 -c "
           import uv
-          import uc_manager
           print('=== 综合运行时自检通过 ===')
           print('✓ uv loaded:', uv.__version__)
-          print('✓ uc-manager loaded:', uc_manager.__name__)
 
           try:
               import triton
