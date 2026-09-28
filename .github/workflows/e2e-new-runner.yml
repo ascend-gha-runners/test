@@ -1,14 +1,15 @@
 name: e2e-new-runner
 # 新 runner 接入 checklist：job pod 到集群内各基础设施服务的连通性
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
-# 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085)
+# 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085, 可选)
 #       / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
 #       / squid 代理(3128) / buildkitd(1234) / vault(8200)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
-#   NPU 规格：-f check-npu=true；amd64 接入：-f container-image=<amd64 镜像>
+#   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
+#   amd64 接入：-f container-image=<amd64 镜像>
 #
 # 注意：runner-label 写错不会报错，job 会一直 Pending 排队直到 timeout；
 # 长时间 Pending 先核对 label 与 ascend-ci-deployment 中 scaleSetLabels 是否一致。
@@ -22,6 +23,10 @@ on:
         type: string
       check-npu:
         description: 'NPU 规格勾选：断言 npu-smi 与 davinci 设备在线'
+        type: boolean
+        default: false
+      check-crates:
+        description: 'crates.io 缓存勾选：断言 sparse index dl 改写与下载缓存头（非所有集群部署）'
         type: boolean
         default: false
       container-image:
@@ -89,6 +94,7 @@ jobs:
           echo "PASS: PyPI 缓存链路正常"
 
       - name: crates.io 缓存（8085：sparse index + 下载）
+        if: inputs.check-crates == true
         run: |
           CRATES="http://$CACHE:8085"
           dl=$(curl -s --max-time 20 "$CRATES/index/config.json" | grep -o '"dl": *"[^"]*"' | head -1)
