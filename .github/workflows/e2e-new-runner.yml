@@ -120,7 +120,8 @@ jobs:
           #   5. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
-            --trusted-host "$CACHE" modelscope
+            --trusted-host "$CACHE" modelscope datasets
+          # datasets 为 modelscope.msdatasets 的依赖，pip install modelscope 默认不带
           python3 - <<'PYEOF'
           import os
           import random
@@ -196,9 +197,11 @@ jobs:
           for entry in sorted(os.listdir(ds_root)):
               if entry.startswith("."):
                   continue
+              # 缓存目录名转义规则（实测：qwen2.5 -> qwen2___5）：
+              # "." 转义为 "___"，首个 "___" 为 org/name 分隔符，其余段还原为 "."
               if "___" in entry:
-                  org, name = entry.split("___", 1)
-                  ds_ids.append(f"{org}/{name}")
+                  org, *rest = entry.split("___")
+                  ds_ids.append(f"{org}/{'.'.join(rest)}")
               else:
                   unknown.append(entry)
           if unknown:
