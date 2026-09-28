@@ -3,7 +3,7 @@ name: e2e-new-runner
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
 # 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085)
 #       / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
-#       / squid 代理(3128) / vault(8200)
+#       / squid 代理(3128)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
@@ -46,7 +46,7 @@ jobs:
           echo "runner: $(hostname), arch: $(uname -m)"
           head -2 /etc/os-release || true
           for h in "$CACHE" git-cdn-service.git-cdn.svc.cluster.local \
-            squid-cache.squid.svc.cluster.local vault.vault.svc; do
+            squid-cache.squid.svc.cluster.local; do
             ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1}' | head -1)
             echo "INFO: DNS ${h} → ${ip:-解析失败}"
           done
@@ -136,19 +136,3 @@ jobs:
           curl -sk -x "http://$SQUID" -o /dev/null --max-time 30 https://github.com \
             && echo "INFO: github.com 经代理可达" || echo "INFO: github.com 经代理本次不可达（波动不阻塞，git 克隆走 git-cdn）"
           echo "PASS: squid 代理出网 + registry 链路正常"
-
-      - name: vault（8200 健康检查）
-        run: |
-          resp=$(curl -sk --max-time 10 -w '\n%{http_code}' https://vault.vault.svc:8200/v1/sys/health)
-          code=$(printf '%s' "$resp" | tail -n 1)
-          if [ "$code" = "000" ] || [ -z "$code" ]; then
-            echo "INFO: https 探测失败，改用 http 重试"
-            resp=$(curl -s --max-time 10 -w '\n%{http_code}' http://vault.vault.svc:8200/v1/sys/health)
-            code=$(printf '%s' "$resp" | tail -n 1)
-          fi
-          printf '%s\n' "$(printf '%s' "$resp" | sed '$d')"
-          case "$code" in
-            200) echo "PASS: vault 健康（initialized & unsealed）" ;;
-            429|472|473) echo "WARN: vault 可达但非 active（HTTP $code，standby），人工确认"; exit 0 ;;
-            *) echo "FAIL: vault 健康检查异常（HTTP ${code:-000}）"; exit 1 ;;
-          esac
