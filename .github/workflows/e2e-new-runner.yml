@@ -3,7 +3,6 @@ name: e2e-new-runner
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
 # 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085, 可选)
 #       / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
-#       / squid 代理(3128)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
@@ -44,14 +43,12 @@ jobs:
       image: ${{ inputs.container-image }}
     env:
       CACHE: cache-service.nginx-pypi-cache.svc.cluster.local
-      SQUID: squid-cache.squid.svc.cluster.local:3128
     steps:
       - name: 环境信息（INFO）
         run: |
           echo "runner: $(hostname), arch: $(uname -m)"
           head -2 /etc/os-release || true
-          for h in "$CACHE" git-cdn-service.git-cdn.svc.cluster.local \
-            squid-cache.squid.svc.cluster.local; do
+          for h in "$CACHE" git-cdn-service.git-cdn.svc.cluster.local; do
             ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1}' | head -1)
             echo "INFO: DNS ${h} → ${ip:-解析失败}"
           done
@@ -129,16 +126,3 @@ jobs:
         run: |
           sed -Ei 's@https?://(repo\.huaweicloud\.com/openeuler|repo\.openeuler\.org|mirrors\.openeuler\.org)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8083@g' /etc/yum.repos.d/*.repo 2>/dev/null || true
           dnf clean all >/dev/null 2>&1 && dnf makecache >/dev/null 2>&1 && echo "INFO: yum 缓存链路可用" || echo "INFO: yum 探针未通过（镜像源格式差异），不阻塞"
-
-      - name: squid 正向代理（3128：出网 + registry pull-through）
-        run: |
-          # -k 仅绕过 squid 自签 CA；生产 job 由 pod template 注入 squid-ca-cert 信任
-          code=$(curl -sk -x "http://$SQUID" -o /dev/null -w '%{http_code}' --max-time 30 https://www.baidu.com)
-          echo "baidu.com 经代理 → $code"
-          [ "$code" = "200" ] || { echo "FAIL: 经 squid 代理出网失败（HTTP ${code:-000}）"; exit 1; }
-          reg=$(curl -sk -x "http://$SQUID" -o /dev/null -w '%{http_code}' --max-time 30 https://registry-1.docker.io/v2/)
-          echo "registry-1.docker.io/v2/ 经代理 → $reg"
-          [ "$reg" = "401" ] || { echo "FAIL: docker registry 经代理异常（HTTP ${reg:-000}，期望 401）"; exit 1; }
-          curl -sk -x "http://$SQUID" -o /dev/null --max-time 30 https://github.com \
-            && echo "INFO: github.com 经代理可达" || echo "INFO: github.com 经代理本次不可达（波动不阻塞，git 克隆走 git-cdn）"
-          echo "PASS: squid 代理出网 + registry 链路正常"
