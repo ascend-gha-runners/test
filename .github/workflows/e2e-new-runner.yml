@@ -8,8 +8,8 @@ name: e2e-new-runner
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
 #   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
-#   模型/数据集缓存均自动扫描：模型结构全量校验 + 抽样加载（写死 3 个），
-#   数据集全量加载验证，无需传 ID
+#   模型/数据集缓存均自动扫描：模型结构全量校验 + 抽样加载（写死 3 个，排除名称含
+#   deleteable 的待删除模型），数据集全量加载验证，无需传 ID
 #   amd64 接入：-f container-image=<amd64 镜像>
 #
 # 注意：runner-label 写错不会报错，job 会一直 Pending 排队直到 timeout；
@@ -115,8 +115,9 @@ jobs:
           # 本步骤验证存量缓存可用性，不联网下载：
           #   1. 扫描已缓存模型清单（兼容 hub/models/<org>/<model> 与 hub/<org>/<model> 两种布局）
           #   2. 全量轻量结构校验：目录内须有实际文件（空目录 = 同步不完整）
-          #   3. 随机抽样 3 个做 SDK 纯本地加载验证
-          #   4. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
+          #   3. 排除名称含 deleteable 的待删除模型（非正式资产，不参与校验与抽样）
+          #   4. 随机抽样 3 个做 SDK 纯本地加载验证
+          #   5. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
             --trusted-host "$CACHE" modelscope
@@ -144,10 +145,16 @@ jobs:
                       if os.path.isdir(path) and not name.startswith("."):
                           models.setdefault(f"{org}/{name}", path)
 
+          # 排除待删除模型（名称含 deleteable，非正式资产，不参与校验与抽样）
+          deleteable = sorted(mid for mid in models if "deleteable" in mid.lower())
+          for mid in deleteable:
+              del models[mid]
+          if deleteable:
+              print(f"INFO: 跳过 {len(deleteable)} 个待删除模型（名称含 deleteable）: {deleteable[:5]}")
           if not models:
-              print("FAIL: 未扫描到任何已缓存模型（缓存卷为空或目录布局不符）")
+              print("FAIL: 未扫描到正式模型（缓存卷为空、目录布局不符或仅剩待删除模型）")
               sys.exit(1)
-          print(f"=== 扫描到 {len(models)} 个已缓存模型 ===")
+          print(f"=== 扫描到 {len(models)} 个正式已缓存模型 ===")
 
           # 2. 全量结构校验（轻量：找到首个文件即通过）
           empty = []
