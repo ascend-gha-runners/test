@@ -2,14 +2,14 @@ name: e2e-new-runner
 # 新 runner 接入 checklist：job pod 到集群内各基础设施服务的连通性
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
 # 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085, 可选)
-#       / 模型权重缓存(modelscope 存量抽检) / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
+#       / 模型/数据集缓存(modelscope 存量抽检) / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
 #   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
-#   模型缓存自动扫描：结构全量校验 + 抽样加载（-f ms-model-sample=N）；
-#   数据集 ID：-f ms-dataset=<org>/<dataset>
+#   模型/数据集缓存均自动扫描：模型结构全量校验 + 抽样加载（-f ms-model-sample=N），
+#   数据集全量加载验证，无需传 ID
 #   amd64 接入：-f container-image=<amd64 镜像>
 #
 # 注意：runner-label 写错不会报错，job 会一直 Pending 排队直到 timeout；
@@ -34,11 +34,6 @@ on:
         description: 'ModelScope 存量模型抽样加载数量（结构校验始终全量）'
         required: false
         default: '3'
-        type: string
-      ms-dataset:
-        description: 'ModelScope 数据集 ID（应填写平台已同步到缓存卷的数据集）'
-        required: false
-        default: 'modelscope/squad'
         type: string
       container-image:
         description: 'job 容器镜像（amd64 runner 接入时传 amd64 镜像）'
@@ -121,7 +116,6 @@ jobs:
       - name: 模型权重缓存（ModelScope 存量缓存抽检验证）
         env:
           MS_MODEL_SAMPLE: ${{ inputs.ms-model-sample || '3' }}
-          MS_DATASET: ${{ inputs.ms-dataset || 'modelscope/squad' }}
         run: |
           # 平台已将模型/数据集预同步到 SFS 共享缓存卷（挂载于 /root/.cache），
           # ModelScope 默认缓存路径 ~/.cache/modelscope 即在其上。
@@ -129,7 +123,7 @@ jobs:
           #   1. 扫描已缓存模型清单（兼容 hub/models/<org>/<model> 与 hub/<org>/<model> 两种布局）
           #   2. 全量轻量结构校验：目录内须有实际文件（空目录 = 同步不完整）
           #   3. 随机抽样 N 个（ms-model-sample，默认 3）做 SDK 纯本地加载验证
-          #   4. 数据集以缓存复用模式加载（ms-dataset 应填平台已同步的 ID）
+          #   4. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
             --trusted-host "$CACHE" modelscope
@@ -190,13 +184,45 @@ jobs:
               print(f"FAIL: 抽样 {len(picked)} 个中 {len(failed)} 个加载失败: {failed}")
               sys.exit(1)
 
-          # 4. 数据集缓存复用加载
+          # 4. 数据集缓存自动扫描与全量加载验证
           from modelscope.msdatasets import MsDataset
 
-          dataset = os.environ["MS_DATASET"]
-          ds = MsDataset.load(dataset, split="train")
-          first = next(iter(ds))
-          print(f"PASS: 数据集 {dataset} 加载成功，样本字段: {list(first.keys())[:5]}")
+          ds_root = os.path.join(cache_root, "dataset")
+          if not os.path.isdir(ds_root) or not os.listdir(ds_root):
+              print(f"FAIL: 未找到已缓存数据集（{ds_root} 不存在或为空）")
+              sys.exit(1)
+
+          ds_ids, unknown = [], []
+          for entry in sorted(os.listdir(ds_root)):
+              if entry.startswith("."):
+                  continue
+              if "___" in entry:
+                  org, name = entry.split("___", 1)
+                  ds_ids.append(f"{org}/{name}")
+              else:
+                  unknown.append(entry)
+          if unknown:
+              print(f"WARN: 以下缓存目录无法反解数据集 ID，需人工确认: {unknown[:10]}")
+          if not ds_ids:
+              print("WARN: 无法从缓存目录反解出数据集 ID，跳过数据集加载验证")
+          else:
+              print(f"=== 扫描到 {len(ds_ids)} 个已缓存数据集 ===")
+              ds_failed = []
+              for ds_id in ds_ids:
+                  try:
+                      loaded = MsDataset.load(ds_id)
+                      if hasattr(loaded, "keys"):
+                          first_key = sorted(loaded.keys())[0]
+                          first = next(iter(loaded[first_key]))
+                      else:
+                          first = next(iter(loaded))
+                      print(f"PASS: 数据集 {ds_id} 加载成功，样本字段: {list(first.keys())[:5]}")
+                  except Exception as exc:
+                      ds_failed.append(ds_id)
+                      print(f"FAIL: 数据集 {ds_id} 加载失败: {exc}")
+              if ds_failed:
+                  print(f"FAIL: {len(ds_failed)} 个数据集加载失败: {ds_failed}")
+                  sys.exit(1)
           PYEOF
           echo "=== 缓存卷占用情况 ==="
           du -sh /root/.cache/modelscope 2>/dev/null
