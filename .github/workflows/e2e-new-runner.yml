@@ -8,7 +8,7 @@ name: e2e-new-runner
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
 #   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
-#   模型/数据集缓存均自动扫描：模型结构全量校验 + 抽样加载（-f ms-model-sample=N），
+#   模型/数据集缓存均自动扫描：模型结构全量校验 + 抽样加载（写死 3 个），
 #   数据集全量加载验证，无需传 ID
 #   amd64 接入：-f container-image=<amd64 镜像>
 #
@@ -30,11 +30,6 @@ on:
         description: 'crates.io 缓存勾选：断言 sparse index dl 改写与下载缓存头（非所有集群部署）'
         type: boolean
         default: false
-      ms-model-sample:
-        description: 'ModelScope 存量模型抽样加载数量（结构校验始终全量）'
-        required: false
-        default: '3'
-        type: string
       container-image:
         description: 'job 容器镜像（amd64 runner 接入时传 amd64 镜像）'
         required: true
@@ -114,15 +109,13 @@ jobs:
           echo "PASS: crates 缓存链路正常"
 
       - name: 模型权重缓存（ModelScope 存量缓存抽检验证）
-        env:
-          MS_MODEL_SAMPLE: ${{ inputs.ms-model-sample || '3' }}
         run: |
           # 平台已将模型/数据集预同步到 SFS 共享缓存卷（挂载于 /root/.cache），
           # ModelScope 默认缓存路径 ~/.cache/modelscope 即在其上。
           # 本步骤验证存量缓存可用性，不联网下载：
           #   1. 扫描已缓存模型清单（兼容 hub/models/<org>/<model> 与 hub/<org>/<model> 两种布局）
           #   2. 全量轻量结构校验：目录内须有实际文件（空目录 = 同步不完整）
-          #   3. 随机抽样 N 个（ms-model-sample，默认 3）做 SDK 纯本地加载验证
+          #   3. 随机抽样 3 个做 SDK 纯本地加载验证
           #   4. 数据集自动扫描缓存目录（<org>___<name> 布局）并全量加载验证
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
@@ -170,7 +163,7 @@ jobs:
           # 3. 随机抽样做 SDK 纯本地加载验证
           from modelscope import snapshot_download
 
-          n = min(int(os.environ.get("MS_MODEL_SAMPLE", "3")), len(models))
+          n = min(3, len(models))
           picked = random.sample(sorted(models), n)
           failed = []
           for mid in picked:
