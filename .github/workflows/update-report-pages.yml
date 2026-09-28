@@ -16,7 +16,6 @@ on:
       - "e2e-hk001-a2-1-smoke"
       - "e2e-hk001-model-sync"
       - "e2e-scan-pytorch-metadata"
-      - "e2e-user-scenarios"
     types:
       - completed
   workflow_dispatch:
