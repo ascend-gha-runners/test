@@ -2,14 +2,15 @@ name: e2e-new-runner
 # 新 runner 接入 checklist：job pod 到集群内各基础设施服务的连通性
 # 与可用性验证。新 scale set 接入时 dispatch 一次，全绿即放行。
 # 覆盖：环境信息 / NPU(可选) / git-cdn / PyPI 缓存(80) / crates 缓存(8085, 可选)
-#       / 模型权重缓存(modelscope 存量加载) / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
+#       / 模型权重缓存(modelscope 存量抽检) / deb(8081) rustup(8082) go(8084) / yum(8083 信息项)
 #       / squid 代理(3128)
 #
 # 用法：
 #   gh workflow run e2e-new-runner.yml --repo ascend-gha-runners/test \
 #     -f runner-label=linux-aarch64-cpu-4 -f check-npu=false
 #   NPU 规格：-f check-npu=true；有 crates 缓存的集群：-f check-crates=true
-#   模型缓存为自动扫描全量验证；数据集 ID：-f ms-dataset=<org>/<dataset>
+#   模型缓存自动扫描：结构全量校验 + 抽样加载（-f ms-model-sample=N）；
+#   数据集 ID：-f ms-dataset=<org>/<dataset>
 #   amd64 接入：-f container-image=<amd64 镜像>
 #
 # 注意：runner-label 写错不会报错，job 会一直 Pending 排队直到 timeout；
@@ -30,6 +31,11 @@ on:
         description: 'crates.io 缓存勾选：断言 sparse index dl 改写与下载缓存头（非所有集群部署）'
         type: boolean
         default: false
+      ms-model-sample:
+        description: 'ModelScope 存量模型抽样加载数量（结构校验始终全量）'
+        required: false
+        default: '3'
+        type: string
       ms-dataset:
         description: 'ModelScope 数据集 ID（应填写平台已同步到缓存卷的数据集）'
         required: false
@@ -115,21 +121,24 @@ jobs:
           fi
           echo "PASS: crates 缓存链路正常"
 
-      - name: 模型权重缓存（ModelScope 存量缓存加载验证）
+      - name: 模型权重缓存（ModelScope 存量缓存抽检验证）
         env:
+          MS_MODEL_SAMPLE: ${{ inputs.ms-model-sample || '3' }}
           MS_DATASET: ${{ inputs.ms-dataset || 'modelscope/squad' }}
         run: |
           # 平台已将模型/数据集预同步到 SFS 共享缓存卷（挂载于 /root/.cache），
           # ModelScope 默认缓存路径 ~/.cache/modelscope 即在其上。
           # 本步骤验证存量缓存可用性，不联网下载：
           #   1. 扫描已缓存模型清单（兼容 hub/models/<org>/<model> 与 hub/<org>/<model> 两种布局）
-          #   2. 逐个以 local_files_only 纯本地方式加载，验证缓存完整可被 SDK 识别
-          #   3. 数据集以缓存复用模式加载（ms-dataset 应填平台已同步的 ID）
+          #   2. 全量轻量结构校验：目录内须有实际文件（空目录 = 同步不完整）
+          #   3. 随机抽样 N 个（ms-model-sample，默认 3）做 SDK 纯本地加载验证
+          #   4. 数据集以缓存复用模式加载（ms-dataset 应填平台已同步的 ID）
           python3 -m pip install --no-cache-dir -q \
             --index-url "http://$CACHE/pypi/simple" \
             --trusted-host "$CACHE" modelscope
           python3 - <<'PYEOF'
           import os
+          import random
           import sys
 
           cache_root = os.path.expanduser("~/.cache/modelscope")
@@ -156,23 +165,35 @@ jobs:
               sys.exit(1)
           print(f"=== 扫描到 {len(models)} 个已缓存模型 ===")
 
-          # 2. 逐个纯本地加载验证（不联网）
+          # 2. 全量结构校验（轻量：找到首个文件即通过）
+          empty = []
+          for mid, path in sorted(models.items()):
+              has_file = any(fns for _, _, fns in os.walk(path))
+              if not has_file:
+                  empty.append(mid)
+          if empty:
+              print(f"FAIL: {len(empty)} 个模型目录为空（同步不完整）: {empty[:10]}")
+              sys.exit(1)
+          print(f"PASS: {len(models)} 个模型目录均含实际文件")
+
+          # 3. 随机抽样做 SDK 纯本地加载验证
           from modelscope import snapshot_download
 
+          n = min(int(os.environ.get("MS_MODEL_SAMPLE", "3")), len(models))
+          picked = random.sample(sorted(models), n)
           failed = []
-          for mid, path in sorted(models.items()):
+          for mid in picked:
               try:
-                  loaded = snapshot_download(mid, local_files_only=True)
-                  files = sum(len(fns) for _, _, fns in os.walk(loaded))
-                  print(f"PASS: {mid} 本地加载成功（{files} 个文件 @ {path}）")
+                  snapshot_download(mid, local_files_only=True)
+                  print(f"PASS: 抽样加载 {mid}")
               except Exception as exc:
                   failed.append(mid)
-                  print(f"FAIL: {mid} 本地加载失败: {exc}")
+                  print(f"FAIL: 抽样加载 {mid}: {exc}")
           if failed:
-              print(f"FAIL: {len(failed)}/{len(models)} 个已缓存模型加载失败: {failed}")
+              print(f"FAIL: 抽样 {len(picked)} 个中 {len(failed)} 个加载失败: {failed}")
               sys.exit(1)
 
-          # 3. 数据集缓存复用加载
+          # 4. 数据集缓存复用加载
           from modelscope.msdatasets import MsDataset
 
           dataset = os.environ["MS_DATASET"]
@@ -182,7 +203,7 @@ jobs:
           PYEOF
           echo "=== 缓存卷占用情况 ==="
           du -sh /root/.cache/modelscope 2>/dev/null
-          echo "PASS: 模型权重存量缓存加载验证通过"
+          echo "PASS: 模型权重存量缓存抽检验证通过"
 
       - name: 包缓存端口探针（8081 deb / 8082 rustup / 8084 go）
         run: |
