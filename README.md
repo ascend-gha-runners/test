@@ -15,7 +15,7 @@
 
 本仓库采用“规约（意图）- 引擎（逻辑）- 编排（策略）”三层解耦设计：
 
-1. **规约层（Specification）**：在 [`docs/test-cases.md`](docs/test-cases.md) 与 [`.github/config/test_cases.json`](.github/config/test_cases.json) 固化测试目的与预期行为契约，涵盖硬断言、软断言与探针；
+1. **规约与决策层（Specification & ADR）**：在 [`docs/test-cases.md`](docs/test-cases.md)、[`.github/config/test_cases.json`](.github/config/test_cases.json) 以及 [`docs/adr/`](docs/adr/) 固化测试目的、架构决策记录与行为契约；
 2. **编排与执行层（Orchestration & Execution）**：在 `.github/workflows/` 中根据 [`.github/config/runners.json`](.github/config/runners.json) 动态派生覆盖全量 13 个集群的测试矩阵，各特性工作流直接集成基础功能协议验证与真实用户视角的生产构建场景。
 
 ---
