@@ -20,23 +20,38 @@
 
 ---
 
+## 技术方案选型：GitHub Agentic Workflows (GH-AW)
+
+与 [ADR-0003](0003-基于agentic-workflow实现issue驱动的e2e用例自闭环开发与验证.md) 保持一致，本巡检与工单闭环机制**全面采用 GitHub Agentic Workflows (GH-AW, `github/gh-aw`) 方案实现**：
+
+1. **以 Markdown 为核心的巡检定义 (`.github/workflows/agentic-e2e-watcher.md`)**：
+   - **YAML Frontmatter**：声明式配置触发源（监听其他 E2E 工作流完成、定时心跳 cron）、AI 引擎模型、工具箱（`github`, `bash`）以及向目标仓库提单的权限；
+   - **Markdown Prompt Body**：将归因逻辑、断言标准、指纹生成算法与提单格式规范直接写在 Markdown 中，自然接入本仓库 `AGENTS.md` 上下文；
+2. **确定性编译与锁文件 (`gh aw compile -> .lock.yml`)**：
+   - 通过 `gh aw compile` 将 `.md` 编译为 `.lock.yml` 工作流，由 GitHub Actions 官方运行器调度运行；
+   - 杜绝传统自研监控系统的进程僵死、机器挂掉等单点故障，完全依托 GitHub 原生事件流调度；
+3. **安全跨仓操作与权限隔离**：
+   - 仅授予操作 `ascend-gha-runners/docs` 仓库 Issue 的最小 Token 权限（`issues: write`），防止权限横向渗透。
+
+---
+
 ## 决策架构：目标形态 (Target Architecture)
 
-决定在本仓库引入 **基于 Agentic Workflow 的 E2E 异常智能巡检与跨仓工单闭环机制**。
+决定在本仓库引入 **基于 GH-AW 的 E2E 异常智能巡检与跨仓工单闭环机制**。
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Pipeline as E2E 测试流水线 (test)
-    participant Watcher as 巡检触发 (workflow_run / cron)
-    participant Analyzer as Agent 智能归因引擎 (GHA Sandbox)
+    participant Watcher as GH-AW 触发器 (workflow_run / cron)
+    participant Analyzer as GH-AW 智能体容器 (.lock.yml 执行)
     participant DocsRepo as 问题跟踪中枢 (ascend-gha-runners/docs)
     participant Maintainer as 基础设施运维 / 开发团队
 
     Pipeline-->>Watcher: 状态变更: 失败 (Failure) 或 排队超时 (>30m)
     Watcher->>Analyzer: 派发 Run ID、集群、Job 状态与元数据
     rect rgb(240, 248, 255)
-    Note over Analyzer: 加载 AGENTS.md / runners.json / 历史上下文
+    Note over Analyzer: GH-AW 加载 AGENTS.md / runners.json / 历史上下文
     Analyzer->>Analyzer: 自动分类归因: 调度死锁 / 缓存断言 / 驱动内核 / 网络
     Analyzer->>Analyzer: 提取关键证据: 缺失标签、响应头、退出码、日志切片
     Analyzer->>DocsRepo: 检索是否已有同集群同类 Open Issue (去重指纹)
@@ -55,15 +70,33 @@ sequenceDiagram
 
 ### 1. 阶段一：双模探测与死锁巡查 (Dual-Trigger & Deadlock Watcher)
 
-巡检触发由两种模式互补构成，杜绝盲区：
-- **事件监听模式 (`workflow_run: completed`)**：
-  监听核心工作流的结束事件。当 `conclusion == 'failure'` 时实时触发分析，毫秒级捕获断言失败与执行崩溃；
-- **心跳巡查模式 (Heartbeat Cron, 建议每 1 小时)**：
-  调用 GitHub API 遍历当前处于 `status in ("queued", "in_progress")` 的运行实例；
+在 GH-AW 的 Frontmatter 中定义双模探测触发：
+```yaml
+name: Agentic E2E Watcher
+on:
+  workflow_run:
+    workflows:
+      - "e2e-cluster-runners"
+      - "e2e-scan-pytorch-metadata"
+      - "e2e-feature-*"
+    types: [completed]
+  schedule:
+    # 每一小时巡检一次排队死锁任务
+    - cron: "0 * * * *"
+engine: claude-3-5-sonnet
+permissions:
+  actions: read
+  issues: write
+tools:
+  - github
+  - bash
+```
+- **事件监听模式 (`workflow_run: completed`)**：当 `conclusion == 'failure'` 时实时触发分析，毫秒级捕获断言失败与执行崩溃；
+- **心跳巡查模式 (Heartbeat Cron, 每 1 小时)**：调用 GitHub API 遍历当前处于 `status in ("queued", "in_progress")` 的运行实例；
   - **死锁判定阈值**：单个 Job 排队等待时间超过 **30 分钟**，即判定为“Runner 资源不可达/调度死锁”；
   - 自动打断盲目等待 24 小时的行为，提前介入归因并告警。
 
-### 2. 阶段二：Agent 智能归因与证据链提取 (Autonomous Reasoning)
+### 2. 阶段二：Agent 智能归因与证据链提取 (Autonomous Reasoning via GH-AW)
 
 Agent 在沙箱容器内运行，加载仓库内规则与元数据，执行层次化推断：
 
@@ -120,16 +153,16 @@ Agent 在沙箱容器内运行，加载仓库内规则与元数据，执行层�
 ## 理由与系统收益
 
 1. **破除静默失败**：将“排队 24 小时无人知晓”缩短至 30 分钟内主动报出，极大缩短集群故障感知 MTTR；
-2. **高质量智能降噪**：依靠 Agentic 推断完成初步日志脱敏、关键证据裁剪与归因，告别原始日志垃圾；
+2. **高质量智能降噪**：依托 GH-AW 智能体推断完成初步日志脱敏、关键证据裁剪与归因，告别原始日志垃圾；
 3. **组织级运维统一大盘**：所有测试暴露出的集群基础设施隐患自动收敛至 `docs` 仓库，与业务反馈缺陷同台治理；
-4. **形成正反双向飞轮**：
-   - **正向 (ADR-0003)**：上游需求 -> Agent 自动写 E2E 用例 -> 跑真实集群自愈 -> 提 PR 合入；
-   - **反向 (ADR-0004)**：常态巡检跑测 -> Agent 智能捕获异常 -> 自动归因并提 Issue -> 驱动基础设施修复。
+4. **形成 GH-AW 正反双向飞轮**：
+   - **正向 (ADR-0003)**：上游需求 -> GH-AW 智能体自动写 E2E 用例 -> 跑真实集群自愈 -> 提 PR 合入；
+   - **反向 (ADR-0004)**：常态巡检跑测 -> GH-AW 智能体捕获异常 -> 自动归因并提 Issue -> 驱动基础设施修复。
 
 ---
 
 ## 实施路线图 (Rollout Roadmap)
 
-- **Phase 1（本次）**：确立 ADR 决策、架构边界、指纹机制与工单标准；
-- **Phase 2（本地诊断核心）**：在 `scripts/` 下编写独立的诊断器 `scripts/e2e_watcher_analyzer.py`，支持给定 Run ID 自动拉取日志并输出符合模板的 Markdown 报告与指纹；
-- **Phase 3（工作流接入）**：配置 `.github/workflows/agentic-e2e-watcher.yml`，注入具备跨仓权限的 GitHub Token/App，打通心跳扫描与自动提 Issue。
+- **Phase 1（本次）**：确立 ADR 决策、架构边界、指纹机制与 GH-AW 规范标准；
+- **Phase 2（原型验证）**：编写 `.github/workflows/agentic-e2e-watcher.md`，使用 `gh aw compile` 编译为 `.lock.yml`，在特定失败用例上进行端到端试跑；
+- **Phase 3（跨仓联通）**：注入具备跨仓权限的 GitHub Token/App，打通向 `ascend-gha-runners/docs` 的心跳扫描与自动提 Issue。
