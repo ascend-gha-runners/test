@@ -9,7 +9,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80",
       "service_port": 80,
-      "client": ["pip", "uv"],
+      "client": [
+        "pip",
+        "uv"
+      ],
       "workflow": ".github/workflows/e2e-feature-pypi-cache.yml",
       "engine_scenario": "pypi",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -35,7 +38,9 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#apt-cache-port-8081",
       "service_port": 8081,
-      "client": ["apt-get"],
+      "client": [
+        "apt-get"
+      ],
       "workflow": ".github/workflows/e2e-feature-apt-cache.yml",
       "engine_scenario": "apt",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12",
@@ -58,7 +63,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#rust-rustup-cache-port-8082",
       "service_port": 8082,
-      "client": ["rustup", "curl"],
+      "client": [
+        "rustup",
+        "curl"
+      ],
       "workflow": ".github/workflows/e2e-feature-rustup-cache.yml",
       "engine_scenario": "rustup",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -83,7 +91,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083",
       "service_port": 8083,
-      "client": ["dnf", "yum"],
+      "client": [
+        "dnf",
+        "yum"
+      ],
       "workflow": ".github/workflows/e2e-feature-yum-cache.yml",
       "engine_scenario": "yum",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -106,7 +117,9 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085",
       "service_port": 8085,
-      "client": ["cargo"],
+      "client": [
+        "cargo"
+      ],
       "workflow": ".github/workflows/e2e-feature-crates-cache.yml",
       "engine_scenario": "crates",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -132,7 +145,9 @@
       "category": "runner-scheduling",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod",
       "service_port": null,
-      "client": ["gha-runner-scale-set"],
+      "client": [
+        "gha-runner-scale-set"
+      ],
       "workflow": ".github/workflows/e2e-cluster-runners.yml",
       "engine_scenario": "cluster_runners",
       "default_container": null,
@@ -157,7 +172,10 @@
       "category": "index-integrity",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80",
       "service_port": 80,
-      "client": ["python", "pip"],
+      "client": [
+        "python",
+        "pip"
+      ],
       "workflow": ".github/workflows/e2e-cross-cluster-pep658.yml",
       "engine_scenario": "pep658",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -177,38 +195,18 @@
       }
     },
     {
-      "id": "TC-E2E-USER-SCENARIOS",
-      "name": "vLLM-Ascend 生产全链路用户端到端组合场景",
-      "category": "user-scenario",
-      "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
-      "service_port": 80,
-      "client": ["pip", "uv", "cargo", "apt-get", "dnf", "git"],
-      "workflow": ".github/workflows/e2e-user-scenarios.yml",
-      "engine_scenario": "all",
-      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": "all",
-      "assertions": {
-        "hard": [
-          "OS 包管理器安装通过 (8081 或 8083)",
-          "Python + uv 组合安装通过 (80)",
-          "Rust 工具链与 crate 编译通过 (8082 + 8085)",
-          "Git 代理克隆通过"
-        ],
-        "soft": [
-          "Crate 403 优雅容灾"
-        ],
-        "probe": [
-          "各集群时延与网络吞吐指标"
-        ]
-      }
-    },
-    {
       "id": "TC-FEAT-A2-NGINX-CACHE",
       "name": "hk-001 A2 (gy-001/wlcb-001) nginx-pypi-cache(-new) 真实客户场景",
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
       "service_port": 80,
-      "client": ["pip", "apt-get", "dnf", "rustup", "go"],
+      "client": [
+        "pip",
+        "apt-get",
+        "dnf",
+        "rustup",
+        "go"
+      ],
       "workflow": ".github/workflows/e2e-hk001-a2-1-nginx-cache.yml",
       "engine_scenario": "native-clients",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -236,7 +234,10 @@
       "category": "storage-consistency",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/",
       "service_port": null,
-      "client": ["python", "filesystem"],
+      "client": [
+        "python",
+        "filesystem"
+      ],
       "workflow": ".github/workflows/e2e-hk001-model-sync.yml",
       "engine_scenario": "model-cache-inventory",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",

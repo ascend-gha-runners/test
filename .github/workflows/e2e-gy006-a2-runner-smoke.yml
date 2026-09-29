@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: 环境与架构
         run: |
-          echo "runner: $(hostname)"
+          echo "runner: $(cat /etc/hostname 2>/dev/null || uname -n)"
           uname -m | grep -qx aarch64 || { echo "FAIL: 架构不是 aarch64"; exit 1; }
           echo "PASS: aarch64"
 
@@ -59,6 +59,7 @@ jobs:
 
       - name: git-cdn 代理
         run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ || true
           git config --get-regexp insteadof || true
           git clone --depth 1 https://github.com/ascend-gha-runners/test /tmp/t \
             || { echo "FAIL: git clone 失败"; exit 1; }

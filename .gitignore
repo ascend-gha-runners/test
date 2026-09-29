@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local test report raw data caches (persisted on gh-pages branch only)
+data/
+site/data/
+.pytest_cache/

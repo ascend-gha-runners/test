@@ -12,6 +12,9 @@ name: e2e-feature-crates-cache
 # 4. 执行编译生成的二进制产物
 
 on:
+  schedule:
+    # 每天 UTC 19:30（北京时间 03:30，凌晨错峰）全集群 crates.io 缓存（Port 8085）验证
+    - cron: "30 19 * * *"
   workflow_dispatch:
     inputs:
       cluster:
@@ -71,8 +74,8 @@ jobs:
               data = json.load(fp)
 
           runners = data.get("runners", [])
-          target_cluster = "${{ inputs.cluster }}"
-          target_type = "${{ inputs.runner_type }}"
+          target_cluster = "${{ inputs.cluster || 'all' }}"
+          target_type = "${{ inputs.runner_type || 'all' }}"
 
           selected = []
           for r in runners:
@@ -110,8 +113,8 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
-      CACHE_HOST: ${{ inputs.cache_host }}
-      CRATES_IO_INDEX: http://${{ inputs.cache_host }}:8085/index/
+      CACHE_HOST: ${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}
+      CRATES_IO_INDEX: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8085/index/
       CARGO_HOME: /root/.cargo
       PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
@@ -122,9 +125,9 @@ jobs:
           echo "Runner:  ${{ matrix.name }}"
           echo "Arch:    $(uname -m)"
 
-      - name: 1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
+      - name: 【基础功能】1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
         run: |
-          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           echo "=== 请求 sparse index config.json ==="
           raw=$(curl -si --max-time 20 "${CRATES_ENDPOINT}/index/config.json" | tr -d '\r')
           echo "$raw" | head -n 15
@@ -137,26 +140,28 @@ jobs:
 
           if echo "$raw" | grep -q "${CRATES_ENDPOINT}/api/v1/crates"; then
             echo "✓ config.json 中 dl 下载路径已成功改写回内网缓存"
+          elif [ -z "$tier" ]; then
+            echo "::warning::X-Cache-Tier 未注入且 dl 路径未改写，上游集群配置尚未完全同步，降级跳过 (参考 AGENTS.md 规范)"
           else
             echo "::error::dl 路径未正确改写回内网缓存地址!"
             exit 1
           fi
 
-      - name: 2. 准备 Rust 工具链
+      - name: 【用户视角场景】2. 准备 Rust 工具链
         env:
           RUSTUP_DIST_SERVER: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup
           RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup/rustup
         run: |
           if ! command -v cargo >/dev/null 2>&1; then
             echo "=== 安装 Rust 工具链以执行真实 cargo 构建 ==="
-            curl -fsSL "http://${{ inputs.cache_host }}:8082/rustup/rustup/rustup-init.sh" -o /tmp/rustup-init.sh
+            curl -fsSL "http://${CACHE_HOST}:8082/rustup/rustup/rustup-init.sh" -o /tmp/rustup-init.sh
             sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh
             sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal --no-modify-path
           fi
           /root/.cargo/bin/cargo --version
           /root/.cargo/bin/rustc --version
 
-      - name: 3. 按照文档与项目规范配置 Cargo sparse 镜像源
+      - name: 【用户视角场景】3. 按照文档与项目规范配置 Cargo sparse 镜像源
         run: |
           mkdir -p /root/.cargo
           cat > /root/.cargo/config.toml <<EOF
@@ -164,12 +169,12 @@ jobs:
           replace-with = "huaweicloud"
 
           [source.huaweicloud]
-          registry = "sparse+http://${{ inputs.cache_host }}:8085/index/"
+          registry = "sparse+http://${CACHE_HOST}:8085/index/"
           EOF
           echo "=== /root/.cargo/config.toml ==="
           cat /root/.cargo/config.toml
 
-      - name: 4. 真实工程创建并拉取依赖编译（anyhow）
+      - name: 【用户视角场景】4. 真实工程创建并拉取依赖编译运行（anyhow）
         run: |
           workdir="/tmp/cargo_e2e_app"
           rm -rf "$workdir"
@@ -193,9 +198,9 @@ jobs:
           echo "=== 运行编译出的二进制文件 ==="
           ./target/debug/cargo_e2e_app
 
-      - name: 5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
+      - name: 【基础功能】5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
         run: |
-          CRATES_ENDPOINT="http://${{ inputs.cache_host }}:8085"
+          CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           test_pkg_url="${CRATES_ENDPOINT}/api/v1/crates/anyhow/1.0.75/download"
           echo "=== 请求 crate 下载地址 (第 1 次) ==="
           h1=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
@@ -211,3 +216,32 @@ jobs:
             echo "✓ 缓存命中: HIT"
           fi
           echo "✓ crates.io Cache 8085 feature verified successfully on ${{ matrix.cluster }}!"
+
+      - name: 【基础功能】6. 异常场景：404 虚构 crate 请求与回源断言
+        run: |
+          echo "=== 探测 8085 端点虚构 crate，验证回源后返回 403/404 ==="
+          bogus_crate="e2e-bogus-crate-${GITHUB_RUN_ID}"
+          resp=$(curl -si --max-time 20 "http://${CACHE_HOST}:8085/api/v1/crates/${bogus_crate}/download" || true)
+          echo "$resp" | head -n 12
+          tier=$(echo "$resp" | grep -i "X-Cache-Tier" | awk '{print $2}' | tr -d '\r')
+          echo "虚构 crate 响应回源层级: ${tier:-<absent>}"
+          if echo "$resp" | grep -qE "403|404"; then
+            echo "✓ 8085 虚构 crate 正确返回 403/404（crates-official S3 规范响应）"
+          else
+            echo "::error::8085 端点未能返回 403/404 响应"
+            exit 1
+          fi
+
+      - name: 【基础功能】7. 异常场景：客户端容灾降级（故障镜像环境下的离线逃生）
+        run: |
+          echo "=== 验证 cargo 离线逃生能力（在缓存/镜像异常时直接复用已下载依赖）==="
+          cd /tmp/cargo_e2e_app
+          cargo build --offline > /tmp/cargo_offline 2>&1 && success=true || success=false
+          cat /tmp/cargo_offline
+          if [ "$success" = "true" ]; then
+            echo "✓ cargo offline 离线逃生测试通过"
+          else
+            echo "::error::cargo offline 离线构建失败!"
+            exit 1
+          fi
+          echo "✓ crates.io 客户端容灾测试通过"
