@@ -1,5 +1,5 @@
 name: e2e-hk001-model-sync
-# 三个 runner 的 ModelScope / HuggingFace 模型缓存一致性比对。
+# 三个 runner 的模型缓存一致性比对(默认只比 ModelScope)。
 #   基准: hk-001   (linux-amd64-cpu-2-hk001, amd64 CPU)
 #   对比: gy-001   (linux-aarch64-a2-1-gy001, A2 aarch64 NPU)
 #         wlcb-001 (linux-aarch64-a2-1-wlcb001, A2 aarch64 NPU)
@@ -9,10 +9,11 @@ name: e2e-hk001-model-sync
 # share-id 不同,见 manifests/liqo/provider-*/ascend-gha-runners-hk-001/pvc.yaml),
 # 所以模型缓存互相独立。同一个 RUN 内并发采集清单,再由 ubuntu job 汇总比对。
 #
-# 断言分级(见 AGENTS):
-#   硬断言(exit 1): hk-001 基线存在的模型,在 gy-001 / wlcb-001 上必须存在
+# 判定(见 scripts/compare_model_inventory.py):
+#   硬断言(exit 1): 基线(≥10GiB)存在的 model 在 gy-001 / wlcb-001 上必须存在
 #   软断言(WARN) : 同名模型体积不一致
-#   信息项        : 非基线 runner 多出的模型,仅记录,不判失败
+#   信息项        : 基线 <10GiB 的模型直接忽略; 回收站/多出仅记录
+#   模型源        : 默认 modelscope (--sources 可改; HF 目前不参与)
 on:
   workflow_dispatch:
     inputs:
@@ -128,4 +129,6 @@ jobs:
           find reports -type f -name 'model_inventory_*.json' -print || true
           python3 scripts/compare_model_inventory.py \
             --reports-dir reports \
-            --baseline-cluster hk-001
+            --baseline-cluster hk-001 \
+            --sources modelscope \
+            --min-model-bytes 10737418240

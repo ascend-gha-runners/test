@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Compare ModelScope / HuggingFace model inventories across runners.
+Compare model inventories across runners.
 
+By default only the ModelScope inventory is compared (`--sources modelscope`).
 Baseline defaults to cluster `hk-001` (the amd64 CPU runner). For every other
 runner it reports models that exist in the baseline but are MISSING there, plus
 models that are EXTRA (informational only).
 
+Baseline models smaller than `--min-model-bytes` (default 10 GiB) are ignored
+entirely: they are partial/stub copies and must not drive a "missing" verdict.
+
 Assertion grading (see AGENTS.md):
   * HARD : a *usable* baseline model missing on another runner   -> exit 1
   * SOFT : same model id, size differs beyond tolerance          -> WARN
-  * INFO : extra models, `*.deleteable` trash, or baseline stubs -> recorded only
+  * INFO : extra models, `*.deleteable` trash, or sub-threshold  -> recorded only
 
 Noise handling (see scan_model_inventory.py):
-  * Baseline entries flagged as stubs (HF without snapshots / ModelScope below
-    the size threshold) are NOT required on other runners — they only mean the
-    baseline copy itself is incomplete.
   * Models present on the other runner only as `<name>.deleteable` are treated
     as intentionally removed, not as "extra".
   * If the baseline inventory is missing/empty the comparison is skipped (WARN)
@@ -27,7 +28,12 @@ import json
 import os
 import sys
 
-SOURCES = [("modelscope", "ModelScope"), ("huggingface", "HuggingFace")]
+SOURCES = {
+    "modelscope": "ModelScope",
+    "huggingface": "HuggingFace",
+}
+# Baseline models smaller than this are ignored entirely (partial/stub copies).
+DEFAULT_MIN_BASELINE_BYTES = 10 * 1024 ** 3  # 10 GiB
 
 
 def fmt_size(n):
@@ -41,10 +47,11 @@ def fmt_size(n):
     return f"{n:.1f}PiB"
 
 
-def is_stub(source, meta):
+def is_ignored(source, meta, min_bytes):
+    """True when a baseline entry must be skipped (stub / incomplete copy)."""
     if source == "huggingface":
         return not (meta or {}).get("complete", False)
-    return bool((meta or {}).get("stub", False))
+    return ((meta or {}).get("size_bytes") or 0) < min_bytes
 
 
 def load_reports(reports_dir):
@@ -78,12 +85,32 @@ def main():
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--baseline-cluster", default="hk-001")
     parser.add_argument(
+        "--sources",
+        default="modelscope",
+        help="逗号分隔的模型源,默认仅 modelscope (可选 modelscope,huggingface)",
+    )
+    parser.add_argument(
+        "--min-model-bytes",
+        type=int,
+        default=DEFAULT_MIN_BASELINE_BYTES,
+        help="基线小于该体积的模型直接忽略 (默认 10GiB)",
+    )
+    parser.add_argument(
         "--size-tolerance",
         type=float,
         default=0.01,
         help="Relative size mismatch tolerance before WARN (default 0.01 = 1%%)",
     )
     args = parser.parse_args()
+
+    selected = []
+    for name in args.sources.split(","):
+        name = name.strip().lower()
+        if name in SOURCES:
+            selected.append((name, SOURCES[name]))
+    if not selected:
+        print(f"WARN: --sources '{args.sources}' 无法识别,跳过")
+        return 0
 
     reports = load_reports(args.reports_dir)
     if not reports:
@@ -106,9 +133,11 @@ def main():
     summary_rows = []    # (source_label, base_usable, runner, n_missing, n_extra, n_size)
     baseline_empty = []
 
-    for source, label in SOURCES:
+    for source, label in selected:
         base_models = baseline.get(source) or {}
-        base_usable = {m: v for m, v in base_models.items() if not is_stub(source, v)}
+        base_usable = {
+            m: v for m, v in base_models.items() if not is_ignored(source, v, args.min_model_bytes)
+        }
         if not base_models:
             baseline_empty.append(label)
 
@@ -123,7 +152,7 @@ def main():
                     continue
                 if mid in other_trash:
                     trashed.append(mid)
-                elif is_stub(source, meta):
+                elif is_ignored(source, meta, args.min_model_bytes):
                     base_stub.append(mid)
                 else:
                     missing.append((mid, (meta or {}).get("size_bytes"), (meta or {}).get("files")))
@@ -136,7 +165,9 @@ def main():
                 o = (other_models.get(mid) or {}).get("size_bytes")
                 if not b or not o:
                     continue
-                if is_stub(source, base_models[mid]) or is_stub(source, other_models[mid]):
+                if is_ignored(source, base_models[mid], args.min_model_bytes) or is_ignored(
+                    source, other_models[mid], args.min_model_bytes
+                ):
                     continue
                 if abs(b - o) / max(b, o) > args.size_tolerance:
                     size_mismatch.append((mid, b, o))
@@ -144,7 +175,9 @@ def main():
             for mid, bsize, bfiles in sorted(missing):
                 hard_missing.append((label, mid, runner, bsize, bfiles))
             for mid in sorted(extra):
-                info_extra.append((label, mid, runner, is_stub(source, other_models[mid])))
+                info_extra.append(
+                    (label, mid, runner, is_ignored(source, other_models[mid], args.min_model_bytes))
+                )
             for mid in sorted(trashed):
                 info_trash.append((label, mid, runner))
             for mid in sorted(base_stub):
@@ -162,8 +195,10 @@ def main():
         "## 🧩 Runner 模型缓存一致性比对 (Model Cache Consistency)",
         "",
         f"> **基线 (baseline)**: `{base_name}` / `{baseline.get('cluster', '')}` "
-        f"| **对比 runner 数**: `{len(others)}` "
-        f"| **判定**: 可用模型缺失=硬失败, 体积不一致=WARN, 回收站/多出/基线残缺=信息项",
+        f"| **模型源**: `{','.join(l for _, l in selected)}` "
+        f"| **基线忽略阈值**: `<{fmt_size(args.min_model_bytes)}` "
+        f"| **对比 runner 数**: `{len(others)}`",
+        f"> **判定**: 可用模型缺失=硬失败, 体积不一致=WARN, 回收站/多出/阈值以下=信息项",
         "",
         "| 模型源 | 基线可用模型数 | 对比 Runner | 缺失 | 多出 | 体积不一致 | 结论 |",
         "|---|---|---|---|---|---|---|",
@@ -228,17 +263,14 @@ def main():
         lines.append("")
 
     if info_base_stub:
-        lines.extend(
-            [
-                "### 🪶 基线自身为 stub/未完整下载,不作为缺失判定 (信息项)",
-                "",
-                "| 模型源 | 模型 | 缺失于 Runner | 基线大小 |",
-                "|---|---|---|---|",
-            ]
+        ignored_runners = {}
+        for _label, _mid, runner, _size in info_base_stub:
+            ignored_runners[runner] = ignored_runners.get(runner, 0) + 1
+        detail = ", ".join(f"`{r}`={n}" for r, n in sorted(ignored_runners.items()))
+        lines.append(
+            f"> 🪶 基线小于阈值 `<{fmt_size(args.min_model_bytes)}` 的模型已直接忽略"
+            f"(不参与缺失判定): {detail}\n"
         )
-        for source_label, mid, runner, size in info_base_stub:
-            lines.append(f"| {source_label} | `{mid}` | `{runner}` | {fmt_size(size)} |")
-        lines.append("")
 
     if info_extra:
         lines.extend(
