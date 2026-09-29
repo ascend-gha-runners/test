@@ -40,6 +40,8 @@
 |---|---|---|---|
 | `TC-SCHED-DUAL-LABEL` | **全集群双标签与算力自检** | [`e2e-cluster-runners.yml`](.github/workflows/e2e-cluster-runners.yml) | 覆盖全部 13 集群 `[型号, 区域]` 双标签调度与芯片驱动自检 |
 | `TC-PEP658-METADATA` | **PyTorch 元数据 PEP 658 完整性** | [`e2e-cross-cluster-pep658.yml`](.github/workflows/e2e-cross-cluster-pep658.yml) | 校验 Simple Index 元数据校验和，针对 pytorch/pytorch#197552 兜底 |
+| `TC-FEAT-A2-NGINX-CACHE` | **hk-001 A2 nginx 真实客户场景** | [`e2e-hk001-a2-1-nginx-cache.yml`](.github/workflows/e2e-hk001-a2-1-nginx-cache.yml) | matrix `gy001`/`wlcb001`：PyPI/PyTorch(`/whl`)/Yum/Rust/Go/Deb 全部真实安装；`wlcb001` 回源不稳时 WARN 降级 |
+| `TC-MODEL-SYNC-HK001` | **三 runner ModelScope 模型一致性** | [`e2e-hk001-model-sync.yml`](.github/workflows/e2e-hk001-model-sync.yml) | 以 hk-001 为基线，比出 gy-001/wlcb-001 缺失的 ModelScope 模型（基线 <10GiB 直接忽略） |
 
 ---
 
@@ -61,6 +63,9 @@ gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 # 烟测与全链路用例
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
+
+# hk-001 A2(gy-001/wlcb-001) nginx 真实客户场景（target 可选 all/gy001/wlcb001）
+gh workflow run e2e-hk001-a2-1-nginx-cache.yml --repo ascend-gha-runners/test -f target=all
 gh run watch <run-id> --repo ascend-gha-runners/test
 ```
 
