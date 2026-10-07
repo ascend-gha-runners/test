@@ -1,0 +1,280 @@
+name: e2e-feature-go-cache
+# Manual canary only. Port 8084 serves module paths at / (NOT /go/).
+# Toolchain comes from the image, not the module proxy or rustup.
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "One exact cluster from runners.json (required; no all/hk-ci alias)"
+        required: true
+        type: string
+      cache_host:
+        description: "Internal nginx Service hostname (no scheme, port or path)"
+        required: true
+        default: cache-service.nginx-pypi-cache.svc.cluster.local
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  select-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select exactly one configured dual-label runner (prefer CPU)
+        id: select
+        env:
+          TARGET_CLUSTER: ${{ inputs.cluster }}
+          CACHE_HOST: ${{ inputs.cache_host }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          cluster = os.environ['TARGET_CLUSTER'].strip()
+          host = os.environ['CACHE_HOST']
+          if not cluster or cluster == 'all':
+              raise SystemExit('An explicit single cluster is required')
+          if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?', host):
+              raise SystemExit('cache_host must be a hostname only')
+          with open('.github/config/runners.json') as f:
+              runners = json.load(f)['runners']
+          matches = [r for r in runners if r['cluster'] == cluster]
+          if not matches:
+              raise SystemExit(f'No configured runner for {cluster}; do not invent labels')
+          matches.sort(key=lambda r: (r.get('type') != 'cpu', r['name']))
+          r = matches[0]
+          labels = r['labels']
+          if len(labels) != 2 or cluster not in labels or not all(isinstance(x, str) for x in labels):
+              raise SystemExit('Expected configured capability + cluster labels')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('runner=' + json.dumps(r, separators=(',', ':')) + '\n')
+          print(json.dumps(r, indent=2))
+          PY
+
+  go-cache:
+    needs: select-runner
+    name: Go cache / ${{ fromJson(needs.select-runner.outputs.runner).name }}
+    runs-on: ${{ fromJson(needs.select-runner.outputs.runner).labels }}
+    timeout-minutes: 20
+    container:
+      image: golang:1.23-bookworm
+    defaults:
+      run:
+        shell: bash
+    env:
+      CACHE_HOST: ${{ inputs.cache_host }}
+      NO_PROXY: ${{ inputs.cache_host }},127.0.0.1,localhost
+      GOTOOLCHAIN: local
+      GOENV: "off"
+      GOWORK: "off"
+      GO111MODULE: "on"
+      GOPRIVATE: ""
+      GONOPROXY: "none"
+      GONOSUMDB: ""
+      # No external sumdb dependency: committed go.sum pins authenticated public
+      # checksums. Go checks downloaded content against these and mod verify runs.
+      # This does NOT test sumdb availability/authentication through nginx.
+      GOSUMDB: "off"
+      GOFLAGS: "-mod=readonly"
+      CGO_ENABLED: "0"
+      LC_ALL: C
+    steps:
+      - name: Verify separate toolchain/image and prepare isolated fixtures
+        id: setup
+        run: |
+          set -euo pipefail
+          for cmd in bash sh git curl go timeout grep awk cmp mktemp; do command -v "$cmd"; done
+          go version
+          go version | grep -Eq 'go1\.23\.'
+          git --version
+          curl --version
+          root=$(mktemp -d "${RUNNER_TEMP}/go-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")
+          mkdir -p "$root/logs" "$root/fixture"
+          echo "TEST_ROOT=$root" >> "$GITHUB_ENV"
+          echo "GOPROXY=http://${CACHE_HOST}:8084" >> "$GITHUB_ENV"
+          cat > "$root/fixture/go.mod" <<'EOF'
+          module example.com/go-cache-e2e
+          go 1.23
+          require rsc.io/quote v1.5.2
+          require (
+            golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c // indirect
+            rsc.io/sampler v1.3.0 // indirect
+          )
+          EOF
+          cat > "$root/fixture/go.sum" <<'EOF'
+          golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c h1:qgOY6WgZOaTkIIMiVjBQcw93ERBE4m30iBm00nkL0i8=
+          golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+          rsc.io/quote v1.5.2 h1:w5fcysjrx7yqtD/aO+QwRjYZOKnaM9Uh2b40tElTs3Y=
+          rsc.io/quote v1.5.2/go.mod h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=
+          rsc.io/sampler v1.3.0 h1:7uVkIFmeBqHfdjD+gZwtXXI+RODJ2Wc4O7MPEh/QiW4=
+          rsc.io/sampler v1.3.0/go.mod h1:T1hPZKmBbMNahiBKFy5HrXp6adAjACjK9JXDnKaTXpA=
+          EOF
+          cat > "$root/fixture/main.go" <<'EOF'
+          package main
+          import ("fmt"; "rsc.io/quote")
+          func main() {
+            if quote.Go() != "Don't communicate by sharing memory, share memory by communicating." { panic("unexpected quote.Go()") }
+            fmt.Println("go-cache-runtime-ok")
+          }
+          EOF
+          cat > "$root/run-scenario.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          scenario=$1
+          mkdir -p "$TEST_ROOT/$scenario/project" "$TEST_ROOT/$scenario/gopath" "$TEST_ROOT/$scenario/modcache" "$TEST_ROOT/$scenario/buildcache"
+          cp "$TEST_ROOT/fixture/"* "$TEST_ROOT/$scenario/project/"
+          export GOPATH="$TEST_ROOT/$scenario/gopath"
+          export GOMODCACHE="$TEST_ROOT/$scenario/modcache"
+          export GOCACHE="$TEST_ROOT/$scenario/buildcache"
+          test -z "$(find "$GOMODCACHE" -mindepth 1 -print -quit)"
+          test -z "$(find "$GOPATH" -mindepth 1 -print -quit)"
+          cd "$TEST_ROOT/$scenario/project"
+          go env GOPROXY GOSUMDB GOTOOLCHAIN GOPATH GOMODCACHE > "$TEST_ROOT/logs/$scenario-env.txt"
+          timeout 180 go mod download -x all 2>&1 | tee "$TEST_ROOT/logs/$scenario-download.log"
+          test -s "$GOMODCACHE/cache/download/rsc.io/quote/@v/v1.5.2.zip"
+          # Evidence from Go's actual requests, not merely a separate curl probe.
+          for suffix in info mod zip; do
+            grep -F "${INTERNAL_PROXY}/rsc.io/quote/@v/v1.5.2.${suffix}" "$TEST_ROOT/logs/$scenario-download.log"
+          done
+          timeout 60 go mod verify 2>&1 | tee "$TEST_ROOT/logs/$scenario-verify.log"
+          grep -Fx 'all modules verified' "$TEST_ROOT/logs/$scenario-verify.log"
+          cmp go.sum "$TEST_ROOT/fixture/go.sum"
+          # Disable networking after download: runtime cannot silently fetch missing deps.
+          GOPROXY=off timeout 180 go run . > "$TEST_ROOT/logs/$scenario-run.log" 2>&1
+          grep -Fx 'go-cache-runtime-ok' "$TEST_ROOT/logs/$scenario-run.log"
+          EOF
+
+      - name: 【用户视角场景】Cold module download, pinned sums, compile and run
+        id: primary
+        timeout-minutes: 7
+        run: |
+          set -euo pipefail
+          export INTERNAL_PROXY="$GOPROXY"
+          # Single internal URL: no ',direct' or public client-side fallback.
+          bash "$TEST_ROOT/run-scenario.sh" primary
+
+      - name: 【基础功能】Successful module response cache headers and warm request
+        id: headers
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          url="$GOPROXY/rsc.io/quote/@v/v1.5.2.mod"
+          for n in 1 2; do
+            code=$(curl --noproxy '*' -sS --connect-timeout 10 --max-time 45 -D "$TEST_ROOT/logs/headers-$n.txt" -o "$TEST_ROOT/logs/module-$n.mod" -w '%{http_code}' "$url")
+            test "$code" = 200
+            tr -d '\r' < "$TEST_ROOT/logs/headers-$n.txt" > "$TEST_ROOT/logs/headers-$n-clean.txt"
+            grep -Ei '^X-Go-Cache: (MISS|HIT|EXPIRED|STALE|UPDATING|REVALIDATED|BYPASS)$' "$TEST_ROOT/logs/headers-$n-clean.txt"
+          done
+          if grep -Eiq '^X-Go-Cache: HIT$' "$TEST_ROOT/logs/headers-2-clean.txt"; then
+            echo pass > "$TEST_ROOT/logs/cache-hit.status"
+          else
+            echo not_verified > "$TEST_ROOT/logs/cache-hit.status"
+            echo '::warning::Second response not HIT; concurrent refresh/cache state is a soft observation'
+          fi
+
+      - name: 【基础功能】Informational missing-module 404 probe (no tier claim)
+        id: missing
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          code=$(curl --noproxy '*' -sS --connect-timeout 5 --max-time 45 -D "$TEST_ROOT/logs/missing-headers.txt" -o "$TEST_ROOT/logs/missing-body.txt" -w '%{http_code}' "$GOPROXY/example.invalid/e2e-missing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/@v/v0.0.0.info") || code=transport_error
+          printf '%s\n' "$code" > "$TEST_ROOT/logs/missing-http-status.txt"
+          if [ "$code" = 404 ]; then
+            echo pass > "$TEST_ROOT/logs/missing.status"
+          else
+            echo not_verified > "$TEST_ROOT/logs/missing.status"
+            echo "::warning::404 probe not verified: $code"
+          fi
+          # Current gocache.conf has no X-Cache-Tier and X-Go-Cache lacks always.
+          # A 404 alone cannot establish which nginx upstream fallback ran.
+
+      - name: 【用户视角场景】Go client fallback from invalid local proxy, fresh caches
+        id: fallback
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 7
+        run: |
+          set -euo pipefail
+          export INTERNAL_PROXY="http://${CACHE_HOST}:8084"
+          # A controlled loopback HTTP 503 avoids firewall-dependent behavior of
+          # unbound ports. This fixture never modifies nginx or a production origin.
+          cat > "$TEST_ROOT/fault-proxy.go" <<'EOF'
+          package main
+          import ("net"; "net/http"; "os")
+          func main() {
+            listener, err := net.Listen("tcp", "127.0.0.1:0")
+            if err != nil { panic(err) }
+            if err = os.WriteFile(os.Args[1], []byte("http://"+listener.Addr().String()), 0600); err != nil { panic(err) }
+            server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+              http.Error(w, "e2e local fault fixture", http.StatusServiceUnavailable)
+            })}
+            if err = server.Serve(listener); err != nil { panic(err) }
+          }
+          EOF
+          GOCACHE="$TEST_ROOT/fault-buildcache" timeout 120 go build -o "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.go"
+          "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.url" > "$TEST_ROOT/logs/fault-proxy.log" 2>&1 &
+          fault_pid=$!
+          trap 'kill "$fault_pid" 2>/dev/null || true; wait "$fault_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 50); do
+            if [ -s "$TEST_ROOT/fault-proxy.url" ]; then break; fi
+            sleep 0.1
+          done
+          test -s "$TEST_ROOT/fault-proxy.url"
+          FAULT_PROXY=$(cat "$TEST_ROOT/fault-proxy.url")
+          test "$(curl --noproxy '*' -sS --max-time 5 -o /dev/null -w '%{http_code}' "$FAULT_PROXY/probe")" = 503
+          # First prove the fault alone cannot download a module (separate cache).
+          mkdir -p "$TEST_ROOT/negative/project"
+          cp "$TEST_ROOT/fixture/"* "$TEST_ROOT/negative/project/"
+          cd "$TEST_ROOT/negative/project"
+          set +e
+          GOPROXY="$FAULT_PROXY" GOPATH="$TEST_ROOT/negative/gopath" GOMODCACHE="$TEST_ROOT/negative/modcache" timeout 20 go mod download -x rsc.io/quote > "$TEST_ROOT/logs/negative.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$rc" -ne 124
+          grep -F "$FAULT_PROXY" "$TEST_ROOT/logs/negative.log"
+          grep -F '503 Service Unavailable' "$TEST_ROOT/logs/negative.log"
+          # Pipe falls back on ANY error; comma only on 404/410, not 503.
+          # This is client policy, NOT an injected nginx upstream 5xx test.
+          export GOPROXY="${FAULT_PROXY}|${INTERNAL_PROXY}"
+          bash "$TEST_ROOT/run-scenario.sh" fallback
+          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/fallback-download.log"
+          grep -F '503 Service Unavailable' "$TEST_ROOT/logs/fallback-download.log"
+
+      - name: Always report pass / fail / not_verified
+        if: always()
+        env:
+          SETUP: ${{ steps.setup.outcome }}
+          PRIMARY: ${{ steps.primary.outcome }}
+          HEADERS: ${{ steps.headers.outcome }}
+          FALLBACK: ${{ steps.fallback.outcome }}
+        run: |
+          set -euo pipefail
+          status() { case "$1" in success) echo pass;; failure) echo fail;; *) echo not_verified;; esac; }
+          {
+            echo '## Go module cache (8084)'
+            echo '| Check | Result |'
+            echo '|---|---|'
+            echo "| Separate Go image/toolchain | $(status "$SETUP") |"
+            echo "| Cold internal download + pinned go.sum + real go run | $(status "$PRIMARY") |"
+            echo "| HTTP 200 + X-Go-Cache | $(status "$HEADERS") |"
+            echo "| Warm HIT (soft) | $(cat "${TEST_ROOT:-/nonexistent}/logs/cache-hit.status" 2>/dev/null || echo not_verified) |"
+            echo "| Missing-module 404 (information only) | $(cat "${TEST_ROOT:-/nonexistent}/logs/missing.status" 2>/dev/null || echo not_verified) |"
+            echo "| Go client invalid-local-proxy fallback (isolated) | $(status "$FALLBACK") |"
+            echo '| Nginx upstream tier/5xx failover | not_verified |'
+            echo '| Sumdb network/authentication service | not_verified |'
+            echo
+            echo 'GOSUMDB=off; fixture go.sum is pinned from public sumdb-verified downloads. No public/direct client fallback in primary test. Toolchain image pull is a separate prerequisite.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic logs (including failures)
+        if: ${{ always() && env.TEST_ROOT != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-cache-${{ fromJson(needs.select-runner.outputs.runner).name }}-${{ github.run_attempt }}
+          path: ${{ env.TEST_ROOT }}/logs/
+          retention-days: 7
+          if-no-files-found: warn

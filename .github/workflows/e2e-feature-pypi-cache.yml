@@ -53,10 +53,15 @@ on:
         default: "cache-service.nginx-pypi-cache.svc.cluster.local"
         type: string
       torch_version:
-        description: "PyTorch 目标版本"
+        description: "PyTorch CPU 目标版本（例如 2.4.0，不含 +cpu）"
         required: false
         default: "2.4.0"
         type: string
+      verify_wheel_bytes:
+        description: "人工执行时额外抽样校验 torch 与依赖 wheel 字节 SHA-256（包含大文件下载）"
+        required: false
+        default: true
+        type: boolean
       triton_version:
         description: "triton-ascend 目标版本"
         required: false
@@ -140,6 +145,9 @@ jobs:
       UV_SYSTEM_PYTHON: 1
       TORCH_VERSION: ${{ inputs.torch_version || '2.4.0' }}
       TRITON_VERSION: ${{ inputs.triton_version || '3.2.2' }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: 配置 Git 镜像代理 (加速 GitHub 访问)
         run: |
@@ -160,13 +168,16 @@ jobs:
       - name: 【基础功能】1. 探测内网 PyPI 端点连通性与缓存响应头
         run: |
           echo "=== 探测 PyPI Simple 路径与 X-Pypi-Cache 头 ==="
-          resp=$(curl -si --max-time 15 "${INDEX_URL}/pip/" | head -n 20)
-          echo "$resp"
-          if echo "$resp" | grep -iq "X-Pypi-Cache"; then
-            cache_status=$(echo "$resp" | grep -i "X-Pypi-Cache" | awk '{print $2}' | tr -d '\r')
+          headers=$(mktemp)
+          trap 'rm -f "$headers"' EXIT
+          status=$(curl -sS --max-time 45 -o /dev/null -D "$headers" -w '%{http_code}' "${INDEX_URL}/pip/")
+          head -n 20 "$headers"
+          test "$status" = 200 || { echo "::error::PyPI index HTTP $status"; exit 1; }
+          if grep -iq '^X-Pypi-Cache:' "$headers"; then
+            cache_status=$(awk 'tolower($1)=="x-pypi-cache:" {gsub("\r", "", $2); print $2}' "$headers")
             echo "✓ 响应包含缓存标识头: X-Pypi-Cache=${cache_status}"
           else
-            echo "ℹ X-Pypi-Cache 未显式返回（走标准缓存代理模式）"
+            echo "::warning::X-Pypi-Cache 未显式返回，缓存头观察未验证"
           fi
 
       - name: 【用户视角场景】2. 按照真实项目规范配置 pip 与 uv 多源镜像
@@ -181,9 +192,8 @@ jobs:
       - name: 【用户视角场景】3. 经内网缓存真实安装构建工具 (pip install --no-cache-dir uv uc-manager)
         run: |
           echo "=== 真实安装 uv 与 uc-manager（模拟真实 AI 项目构建环境）==="
-          install_out=$(python3 -m pip install --no-cache-dir uv uc-manager 2>&1)
-          echo "$install_out"
-          if echo "$install_out" | grep -qi "Using cached"; then
+          python3 -m pip install --no-cache-dir --force-reinstall uv uc-manager 2>&1 | tee /tmp/pypi-tools-install.log
+          if grep -qi "Using cached" /tmp/pypi-tools-install.log; then
             echo "::error::检测到本地缓存命中 (Using cached)，未能完全绕过本地磁盘缓存!"
             exit 1
           fi
@@ -197,14 +207,37 @@ jobs:
           curl -sI --max-time 15 "${ASCEND_URL}/" | head -n 10 || true
 
           echo "=== 经内网 /ascend/repos/pypi 真实安装 triton-ascend ==="
-          uv pip install --no-cache --force-reinstall --no-deps "triton-ascend==${TRITON_VERSION}"
+          env -u UV_INDEX -u UV_DEFAULT_INDEX -u UV_FIND_LINKS \
+            uv --no-config pip install --no-cache --force-reinstall --no-deps "triton-ascend==${TRITON_VERSION}"
           python3 -m pip show triton-ascend
           echo "✓ triton-ascend installed successfully via internal ascend repo"
 
+      - name: 【用户视角场景】HTTP wheel/metadata 字节完整性抽样（与宿主架构无关）
+        id: wheel-integrity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_wheel_bytes }}
+        run: |
+          set +e
+          python3 scripts/wheel_integrity_check.py --require-index-origin \
+            --sample "${WHL_URL}" "torch==${TORCH_VERSION}+cpu" \
+            --sample "${INDEX_URL}" 'filelock==3.16.1' \
+            --sample "${INDEX_URL}" 'jinja2==3.1.4' \
+            --sample-count 1 --timeout 60 > wheel-integrity.json
+          result=$?
+          set -e
+          cat wheel-integrity.json
+          case "$result" in
+            0) echo "HTTP wheel samples: pass (torch/filelock/jinja2, one wheel each; not all dependencies)" >> "$GITHUB_STEP_SUMMARY" ;;
+            2) echo "::warning::文件完整性缺少样本或公布的 hash，未验证"
+               echo "HTTP wheel samples: not_verified (see wheel-integrity.json)" >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "HTTP wheel samples: fail" >> "$GITHUB_STEP_SUMMARY"; exit "$result" ;;
+          esac
+
       - name: 【用户视角场景】5. 经内网 /whl 路径真实安装 PyTorch CPU (amd64 架构执行，arm64 跳过)
+        id: torch-install
         run: |
           arch=$(uname -m)
           if [ "$arch" != "x86_64" ] && [ "$arch" != "amd64" ]; then
+            echo "PyTorch CPU install: not_applicable (${arch}, ADR-0002)" >> "$GITHUB_STEP_SUMMARY"
             echo "ℹ 针对 PyTorch 用例跳过 ${arch} (arm64) 架构，PyTorch /whl/cpu 仅在各集群 amd64 节点上测试"
             exit 0
           fi
@@ -213,9 +246,16 @@ jobs:
           curl -sI --max-time 15 "${WHL_URL}/torch/" | head -n 10 || true
 
           echo "=== 经内网 /whl 路径真实安装 PyTorch CPU ==="
-          torch_spec="torch>=${TORCH_VERSION},<${TORCH_VERSION}.99"
-          uv pip install --no-cache "${torch_spec}" --index-url "${WHL_URL}" --extra-index-url "${INDEX_URL}"
-          python3 -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}')"
+          # 空 venv 保证 torch 及所有解析到的依赖实际下载，而不是复用系统包。
+          uv --no-config venv --no-project --no-python-downloads --python "$(command -v python3)" /tmp/pypi-e2e-torch
+          torch_spec="torch==${TORCH_VERSION}+cpu"
+          env -u UV_INDEX -u UV_DEFAULT_INDEX -u UV_FIND_LINKS -u UV_INDEX_URL \
+            -u UV_EXTRA_INDEX_URL -u UV_SYSTEM_PYTHON \
+            uv --no-config pip install --python /tmp/pypi-e2e-torch/bin/python --no-cache \
+            "${torch_spec}" --index-url "${WHL_URL}" --extra-index-url "${INDEX_URL}" \
+            --index-strategy unsafe-best-match --no-python-downloads
+          /tmp/pypi-e2e-torch/bin/python -c "import torch; print(f'✓ PyTorch version: {torch.__version__}, file={torch.__file__}'); assert str(torch.__version__) == __import__('os').environ['TORCH_VERSION'] + '+cpu'; assert torch.ones(2, 2).sum().item() == 4"
+          echo "PyTorch CPU install + dependency resolution + tensor: pass" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 【用户视角场景】6. 真实 Python 运行时多模块导入与计算验证 (torch, triton, uc-manager)
         run: |
@@ -225,19 +265,16 @@ jobs:
           print('✓ uv binary:', uv.find_uv_bin())
           print('✓ uv package version:', importlib.metadata.version('uv'))
 
-          try:
-              import triton
-              print('✓ triton loaded:', getattr(triton, '__version__', 'unknown'))
-          except Exception as e:
-              print('ℹ triton runtime note:', e)
+          import triton
+          print('✓ triton loaded:', getattr(triton, '__version__', 'unknown'))
 
           import platform
           if platform.machine() in ('x86_64', 'amd64'):
               try:
-                  import torch
-                  print('✓ PyTorch loaded:', torch.__version__)
-                  x = torch.ones(2, 2)
-                  print('✓ PyTorch CPU tensor compute check passed:', x.shape)
+                  import subprocess
+                  subprocess.run(['/tmp/pypi-e2e-torch/bin/python', '-c',
+                      'import torch; assert torch.ones(2, 2).sum().item() == 4; print(torch.__version__)'], check=True)
+                  print('✓ PyTorch isolated CPU tensor compute check passed')
               except Exception as e:
                   print('::error::PyTorch import or tensor computation failed:', e)
                   raise
@@ -246,30 +283,72 @@ jobs:
 
           print('All Python runtime checks passed!')
           "
-          python3 -m pip show uv uc-manager triton-ascend || true
+          python3 -m pip show uv uc-manager triton-ascend
 
       - name: 【基础功能】7. 验证 404 回源至 pypi.org 回退机制
+        id: http-fallback
         run: |
           echo "=== 探测上游 404 回退链路 ==="
           bogus="e2e-nonexistent-pkg-${GITHUB_RUN_ID}"
-          resp=$(curl -si --max-time 20 "${INDEX_URL}/${bogus}/" || true)
-          echo "$resp" | head -n 15
-          tier=$(echo "$resp" | grep -i "X-Cache-Tier" | awk '{print $2}' | tr -d '\r')
-          if [ -n "$tier" ]; then
-            echo "✓ X-Cache-Tier 回退标识: ${tier}"
-            echo "$tier" | grep -qE "pypi-org|ustc|nju" && echo "✓ 确定性回源层级断言通过"
+          headers=$(mktemp)
+          trap 'rm -f "$headers"' EXIT
+          status=$(curl -sS --max-time 45 -o /dev/null -D "$headers" -w '%{http_code}' "${INDEX_URL}/${bogus}/")
+          test "$status" = 404 || { echo "::error::Expected HTTP 404, got $status"; exit 1; }
+          tier=$(awk 'tolower($1)=="x-cache-tier:" {gsub("\r", "", $2); print $2}' "$headers")
+          echo "PyPI nonexistent package HTTP status: pass (404)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$tier" = "pypi-org" ]; then
+            echo "PyPI 404 upstream fallback: pass (pypi-org)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "ℹ X-Cache-Tier 未注入，验证 HTTP 404 正常返回"
-            echo "$resp" | grep -q "404" && echo "✓ 404 兜底机制验证通过"
+            echo "::warning::404 返回正常，但未观察到最终 pypi-org 层，不能证明完整回退链"
+            echo "PyPI 404 upstream fallback: not_verified (tier=${tier:-absent})" >> "$GITHUB_STEP_SUMMARY"
           fi
+          echo "Nginx upstream 5xx/507 fallback: not_verified (no production fault injection)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 【基础功能】8. 异常场景：客户端容灾降级 (主源故障自动切换至备用内网缓存)
+        id: client-fallback
         run: |
           echo "=== 模拟主索引源不可达，验证 pip extra-index-url 自动容灾 ==="
-          python3 -m pip install --no-cache-dir \
+          target=$(mktemp -d)
+          trap 'rm -rf "$target"' EXIT
+          # 清空额外源与用户配置，避免系统预装包或其他镜像造成假通过。
+          PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL="${INDEX_URL}" \
+            python3 -m pip install --no-cache-dir --ignore-installed --target "$target" \
             --index-url "http://127.0.0.1:59999/pypi/simple" \
-            --trusted-host 127.0.0.1 \
-            --extra-index-url "${INDEX_URL}" \
-            --retries 1 \
-            idna
-          python3 -c "import idna; print('✓ 客户端容灾测试通过，idna 正常加载:', idna.__version__)"
+            --trusted-host 127.0.0.1 --trusted-host "${CACHE_HOST}" \
+            --extra-index-url "${INDEX_URL}" --timeout 3 --retries 1 idna==3.10
+          PYTHONPATH="$target" python3 -c "import idna; assert idna.__version__ == '3.10'; print('✓ 客户端备用索引真实下载成功')"
+          echo "pip client extra-index recovery: pass (not nginx upstream fallback)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 保留完整性样本证据
+        if: ${{ always() && steps.wheel-integrity.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-integrity-${{ matrix.name }}
+          path: wheel-integrity.json
+          if-no-files-found: warn
+
+      - name: 汇总执行状态（跳过不等于通过）
+        if: always()
+        env:
+          WHEEL_OUTCOME: ${{ steps.wheel-integrity.outcome }}
+          TORCH_OUTCOME: ${{ steps.torch-install.outcome }}
+          HTTP_OUTCOME: ${{ steps.http-fallback.outcome }}
+          CLIENT_OUTCOME: ${{ steps.client-fallback.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os, platform
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n### PyPI execution evidence\n\n')
+              for name in ('WHEEL', 'TORCH', 'HTTP', 'CLIENT'):
+                  outcome = os.environ[name + '_OUTCOME']
+                  if outcome == 'failure':
+                      state = 'fail'
+                  elif outcome != 'success':
+                      state = 'not_verified'
+                  elif name == 'TORCH' and platform.machine() not in ('amd64', 'x86_64'):
+                      state = 'not_applicable (ADR-0002)'
+                  else:
+                      state = 'executed; see detailed assertion result above'
+                  out.write(f'- {name}: {state}\n')
+              out.write('- nginx upstream 5xx/507: not_verified (deployment-repo mock coverage only)\n')
+          PY

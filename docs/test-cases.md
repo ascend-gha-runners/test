@@ -41,6 +41,7 @@ flowchart TD
 | [`TC-FEAT-APT`](#tc-feat-apt) | Ubuntu APT 镜像缓存 | [APT Cache (Port 8081)](https://ascend-gha-runners.github.io/docs/feature/#apt-cache-port-8081) | 8081 (HTTP) | `apt-get` | `e2e-feature-apt-cache.yml` | Ubuntu 22.04 CANN 9.0 |
 | [`TC-FEAT-RUSTUP`](#tc-feat-rustup) | Rust / rustup 工具链缓存 | [Rust Cache (Port 8082)](https://ascend-gha-runners.github.io/docs/feature/#rust-rustup-cache-port-8082) | 8082 (HTTP) | `rustup`, `curl` | `e2e-feature-rustup-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-YUM`](#tc-feat-yum) | openEuler YUM / DNF 缓存 | [YUM Cache (Port 8083)](https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083) | 8083 (HTTP) | `dnf`, `yum` | `e2e-feature-yum-cache.yml` | openEuler CANN 8.2 |
+| [`TC-FEAT-GO`](#tc-feat-go) | Go modules 下载与运行 | [Go Cache (Port 8084)](https://ascend-gha-runners.github.io/docs/feature/) | 8084 (HTTP) | `go` | `e2e-feature-go-cache.yml` | golang:1.23-bookworm |
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
@@ -106,10 +107,11 @@ uv pip install --no-cache "torch>=2.4.0,<2.4.99"
 ```
 
 #### 4. 判定标准
-- **硬断言**：`pip install --no-cache-dir uv uc-manager` 返回码 0；输出中无 `Using cached`；`triton-ascend` 成功安装并能正常 `import triton`；amd64 节点上 PyTorch 成功安装并完成 `torch.ones(2, 2)` 张量计算；
+- **硬断言**：`pip install --no-cache-dir --force-reinstall uv uc-manager` 返回码 0；输出中无 `Using cached`；`triton-ascend` 成功安装并能正常 `import triton`；amd64 节点上在空 venv 安装 `torch==<torch_version>+cpu` 及解析到的依赖，并验证 CPU 版本和张量计算；
+- **人工文件抽样**：`verify_wheel_bytes=true` 时，所有架构 HTTP 下载 torch CPU、filelock、jinja2 各一个固定版本 wheel，以索引 `#sha256` 对实际文件字节校验；metadata 若公布 hash 则额外校验。URL 与重定向须保持索引源 origin，兼容旧链接和 origin 路由，不要求特定链接格式。结果 JSON 留为 artifact。hash mismatch / HTTP 下载失败硬失败；缺少样本或可用 hash 为 `not_verified`；它不等于全量 wheel 或全部依赖校验；
 - **软断言**：请求 `/pypi/simple/six/` 响应包含 `X-Pypi-Cache` 且在二次请求呈现 HIT；
-- **探针**：请求虚构包 `e2e-nonexistent-pkg-${GITHUB_RUN_ID}` 探测 `X-Cache-Tier: pypi-org` 或 404；
-- **异常与容灾断言**：请求不存在的包探测 404 回退链路；主索引源配置故障地址（如 127.0.0.1:59999）时，通过 `--extra-index-url` 能够在连接失败后秒级自动 fallback 成功安装。
+- **404 与回源证据**：虚构包硬断言 HTTP 404；仅观察到 `X-Cache-Tier: pypi-org` 时报告终层回源通过，否则标记层级 `not_verified`，不以正文中的 404 字符证明回退；
+- **客户端容灾硬断言**：主索引源为 loopback 故障地址，在空目标目录、忽略预装包、无本地缓存且清空其他备用源的条件下，经备用内网缓存下载 idna==3.10 并导入成功。此项不是 nginx 上游 5xx/507 回退验证。
 
 ---
 
@@ -142,10 +144,10 @@ apt-get install -y --no-install-recommends git zstd gcc cmake
 ```
 
 #### 4. 判定标准
-- **硬断言**：`apt-get update -y` 返回码 0；`git --version`, `zstd --version`, `gcc --version` 正常输出版本；
+- **硬断言**：清空旧 lists 后 `apt-get update -o APT::Update::Error-Mode=any` 成功；重新下载并安装 git/zstd/gcc/cmake，二进制正常输出版本；
 - **软断言**：无网络超时或重试失败；
 - **探针**：探测 `http://cache-service...:8081` 端口 HTTP 连通状态；
-- **异常与容灾断言**：请求不存在的 deb 包正确返回 404，`apt-get install` 虚构包时正确报错退出（Unable to locate package）；当 sources.list 配置包含故障源时，配置超时与单次重试能快速忽略并由有效源提供服务。
+- **异常与容灾断言**：请求不存在的 deb 包精确返回 HTTP 404，安装虚构包必须匹配缺包错误；独立 lists/archive 的 sources.list 包含 loopback 故障源时，必须观察故障并由有效内网源获取非空 Packages 索引和真实 git deb 下载，只有 update 退出成功不足以证明恢复。
 
 ---
 
@@ -213,12 +215,20 @@ dnf install -y git zstd || yum install -y git zstd
 ```
 
 #### 4. 判定标准
-- **硬断言**：`dnf/yum makecache` 成功返回；`git --version` 与 `zstd --version` 验证正常；
+- **硬断言**：启用 repo 只允许内网 baseurl，空 cachedir 下 `dnf makecache` 成功且 repomd.xml 非空，失败 repo 不可跳过；安装或重新安装 git/zstd 并保留真实 RPM 下载证据，二进制验证正常；
 - **软断言**：无不可达 mirror 报警；
 - **探针**：8083 端口直接探测连通性；
-- **异常与容灾断言**：请求不存在的 rpm 包返回 404，安装虚构包时客户端正确捕获并退出；当 repo 配置首选 baseurl 故障时，DNF 能自动平滑切换至下一有效 baseurl 完成缓存构建。
+- **异常与容灾断言**：虚构 RPM 请求精确读取 HTTP 302/404（302 仅是响应探测，不证明完整回退），安装虚构包必须匹配正确的缺包错误；独立 repo/cachedir 的首 loopback baseurl 失败后，DNF 必须由有效内网 baseurl 提供非空元数据及真实 RPM，不允许 skip_if_unavailable 或忽略失败。
 
 ---
+
+### TC-FEAT-GO
+
+- **用例 ID**：`TC-FEAT-GO`；端口 8084，工作流 `e2e-feature-go-cache.yml`，仅人工选定单集群。
+- **基础功能**：验证 Go proxy 的版本元数据与虚构模块状态；状态与回源层级分开，层级无证据为未验证。
+- **用户场景硬断言**：`GOPROXY=http://<cache_host>:8084`，空 GOPATH/GOMODCACHE，下载固定 `rsc.io/quote@v1.5.2` 及依赖，编译运行并验证输出。主用例不允许 `direct` 或其他代理兜底；`GOTOOLCHAIN=local` 避免工具链隐式下载。
+- **客户端恢复**：Job 内启动仅监听 loopback 的可控 HTTP 503 服务，先证明故障源单独不能下载，再以 `故障代理|内网备用代理` 在独立空缓存真实下载与运行。使用 `|` 对任意错误恢复，避免空闲端口受防火墙影响导致不确定等待；本地 fixture 不修改生产 nginx，上述结果不等同于 nginx 上游 5xx 回退。
+- **校验范围**：Go 工具链独立于待测代理；Go module 校验按 workflow 的显式 GOSUMDB 策略，不宣称外部 checksum 服务可用或全量代理包正确。
 
 ### TC-FEAT-CRATES
 
@@ -227,6 +237,7 @@ dnf install -y git zstd || yum install -y git zstd
 - **名称**：crates.io Sparse Index 与 Crate 下载缓存服务（Port 8085）
 - **官方文档**：[Platform Features - crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085)
 - **关联工作流**：`.github/workflows/e2e-feature-crates-cache.yml`
+- **执行范围**：默认/all 仅 gy-006（已审查 8085 入口）；其他集群选择为 `not_verified`，不据此推断其线上端口缺失。
 - **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`
 
 #### 2. 测试目的
@@ -258,10 +269,10 @@ cargo build
 ```
 
 #### 4. 判定标准
-- **硬断言**：`config.json` 包含改写后的 `http://cache-service...:8085/api/v1/crates`；`cargo build` 编译成功；目标二进制输出预期字串；
+- **硬断言**：`config.json` 包含改写后的 `http://cache-service...:8085/api/v1/crates`；空 registry 缓存下载固定 anyhow==1.0.75，`cargo build` 编译成功；目标二进制输出预期字串；
 - **软断言**：`config.json` 带有 `X-Cache-Tier: rsproxy`；下载接口存在 `X-Crates-Cache`；
 - **探针**：`X-Cache-Tier: rsproxy`；
-- **异常与容灾断言**：虚构 crate 下载请求返回 404 且回源至上游；镜像异常时支持通过 cargo --offline 进行已下载依赖的离线构建逃生。
+- **异常与容灾断言**：虚构 crate 使用带版本的合法下载路径，精确读取 HTTP 403/404 并独立记录回源层级；清除 target 后通过 `cargo build --offline --locked` 从已下载 registry 重新构建并运行，不能复用旧二进制伪装通过。
 - **探针**：上游 USTC 返回 403 Access Denied 时，官方 crates-official 优雅回退兜底（PR #1722 能力）。
 
 ---
@@ -304,7 +315,23 @@ cargo build
 
 ---
 
-## 五、用例执行与复现操作指南
+## 五、用户面覆盖与证据边界
+
+| 用户能力 | 验收证据 | 适用/未验证边界 |
+|---|---|---|
+| PyPI / Ascend | 真实重新安装工具及专有包、运行时导入 | 硬失败不能被打印成功掩盖 |
+| PyTorch + 依赖 | amd64 空 venv 安装固定 CPU 版本、张量计算；HTTP 文件 hash 抽样 | ARM64 安装不适用；HTTP 抽样适用，非全量依赖保证 |
+| APT / YUM | 清空索引及下载缓存、实际包下载/安装、二进制运行 | 客户端容灾需有效源真正交付数据 |
+| Rustup | 现有稳定工具链下载安装与运行 | 本轮未扩大工具链版本范围 |
+| Go | 仅内网代理、空 module 缓存下载、固定 go.sum、运行 | 人工选单集群；外部 sumdb 服务未验证 |
+| crates | gy-006 空 registry 下载编译、清除产物后离线重建 | 其他集群 8085 未验证，不推断端口存在或缺失 |
+| 正常 404 / 客户端恢复 | 精确状态与终层响应头分别报告；客户端备用源独立验证 | 404 本身不证明 nginx 上游故障恢复 |
+| nginx 上游 5xx/507 | 部署仓可控 mock 回归 | 本仓真实集群不注入故障，线上该项未验证 |
+| hk-ci | 暂无测试仓组织 Runner 配置证据 | 与 hk-001 分开，覆盖缺口为未验证，禁止借用标签 |
+
+配置中的 13 集群、20 Runner 仅为调度候选，不是在线健康证明。本轮不绑定部署 revision、不等待 ArgoCD 同步、不新增发布自动化。新增 Go 与大文件完整性抽样只由人工触发；现有生态既有 schedule 保留。
+
+## 六、用例执行与复现操作指南
 
 ### 1. GitHub Actions 触发 (远程矩阵执行)
 ```bash
@@ -318,11 +345,21 @@ gh workflow run e2e-feature-crates-cache.yml --repo ascend-gha-runners/test
 # 触发指定集群与 Runner 类型
 gh workflow run e2e-feature-pypi-cache.yml -f cluster=cn12-001 -f runner_type=npu --repo ascend-gha-runners/test
 
+# 人工单集群 Go 冷缓存下载验证
+# cluster 必填且不能为 all；自动从该集群的真实双标签条目选一个 Runner
+gh workflow run e2e-feature-go-cache.yml -f cluster=cn12-001 --repo ascend-gha-runners/test
+
+# 单集群 PyPI + 跨架构 HTTP 文件 hash 抽样（需要大 wheel 下载）
+gh workflow run e2e-feature-pypi-cache.yml -f cluster=cn12-001 -f runner_type=cpu -f verify_wheel_bytes=true --repo ascend-gha-runners/test
+
+# 仅 gy-006 crates 已审查入口；其他集群为未验证
+gh workflow run e2e-feature-crates-cache.yml -f cluster=gy-006 --repo ascend-gha-runners/test
+
 # 触发全 13 集群联通性验证
 gh workflow run e2e-cluster-runners.yml --repo ascend-gha-runners/test
 ```
 
 ### 2. 双重视角设计规范 (Dual-Perspective Design)
-每个平台特性测试工作流均已闭环实现：
+每个平台特性工作流以以下闭环为目标，具体完成范围以实际断言和结果证据为准（探针或跳过不能代表已验证）：
 1. **基础功能**：端点探测、缓存响应头（MISS/HIT）、协议级 404 回退机制及多源容灾降级；
 2. **用户视角场景**：真实模拟生产 AI 项目（如 `vllm-ascend`）配置镜像源，强制 `--no-cache-dir` 绕过本地缓存，真实安装工具链、下载编译核心依赖（`triton-ascend`、`torch`、`anyhow` 等）并执行 Python/Rust 计算程序完成运行时验证。

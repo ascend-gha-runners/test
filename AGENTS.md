@@ -14,8 +14,8 @@
 | [`docs/adr/`](docs/adr/) | **架构决策记录 (ADR)**<br>• 决策索引: [`docs/adr/README.md`](docs/adr/README.md)<br>• 写作约束: [`docs/adr/AGENTS.md`](docs/adr/AGENTS.md) | **方案变化、选型变更、新增机制时必读**（合入前必须提交对应 ADR） |
 | [`docs/test-cases.md`](docs/test-cases.md) | **测试用例规约详情 (Specification)**<br>• 元数据清单: [`.github/config/test_cases.json`](.github/config/test_cases.json) | 需要了解具体用例的目的、生产调用方式、三级断言标准时 |
 | [`.github/config/runners.json`](.github/config/runners.json) | **13 集群 Runner 拓扑与标签清单** | 调试调度策略、派生测试矩阵、配置双标签 `[型号, 集群名]` 时 |
-| [`.github/workflows/`](.github/workflows/) | **E2E 编排工作流清单** | 编写、调试或修改具体 GitHub Actions 流程时 |
-| [`scripts/`](scripts/) | **测试支撑与看板数据生成脚本** | 修改 PEP 658 校验器、元数据扫描器或测试质量大盘生成逻辑时 |
+| [`.github/workflows/`](.github/workflows/)（[模块规约](.github/workflows/AGENTS.md)） | **E2E 编排工作流清单** | 编写、调试或修改具体 GitHub Actions 流程时 |
+| [`scripts/`](scripts/)（[模块规约](scripts/AGENTS.md)） | **测试支撑与看板数据生成脚本** | 修改 PEP 658 校验器、元数据扫描器或测试质量大盘生成逻辑时 |
 
 ---
 
@@ -87,7 +87,8 @@ Agent 在执行不同任务时，请依照以下路径逐步加载上下文：
 | [`e2e-feature-apt-cache.yml`](.github/workflows/e2e-feature-apt-cache.yml) | Port 8081 (HTTP) | Ubuntu 真实 `apt-get update` & 安装构建依赖 `git`/`zstd`/`gcc`/`cmake` |
 | [`e2e-feature-rustup-cache.yml`](.github/workflows/e2e-feature-rustup-cache.yml) | Port 8082 (HTTP) | rustup 极简稳定工具链真实下载安装与 `rustc`/`cargo` 可执行验证 |
 | [`e2e-feature-yum-cache.yml`](.github/workflows/e2e-feature-yum-cache.yml) | Port 8083 (HTTP) | openEuler 真实 `dnf/yum makecache` & 安装构建依赖 `git`/`zstd` |
-| [`e2e-feature-crates-cache.yml`](.github/workflows/e2e-feature-crates-cache.yml) | Port 8085 (HTTP) | Cargo sparse 镜像、真实工程拉取 `anyhow` 依赖并编译执行、MISS→HIT 缓存头 |
+| [`e2e-feature-go-cache.yml`](.github/workflows/e2e-feature-go-cache.yml) | Port 8084 (HTTP) | 人工单集群、冷缓存下载固定 Go module、go.sum 校验、编译执行及客户端恢复 |
+| [`e2e-feature-crates-cache.yml`](.github/workflows/e2e-feature-crates-cache.yml) | Port 8085 (HTTP) | gy-006 已审查入口、Cargo sparse 冷缓存拉取固定 `anyhow`、编译执行、清除产物后离线重建 |
 
 ### 常用运行命令
 ```bash

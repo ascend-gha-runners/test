@@ -7,6 +7,7 @@ on:
       - "e2e-cross-cluster-pep658"
       - "e2e-feature-apt-cache"
       - "e2e-feature-crates-cache"
+      - "e2e-feature-go-cache"
       - "e2e-feature-pypi-cache"
       - "e2e-feature-rustup-cache"
       - "e2e-feature-yum-cache"
