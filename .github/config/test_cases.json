@@ -19,8 +19,10 @@
           "pip/uv 依赖真实安装成功 (uc-manager, uv)",
           "无本地磁盘缓存命中 (禁止 Using cached)",
           "华为昇腾专属源经 /ascend/repos/pypi 真实安装 triton-ascend 并验证 import triton",
-          "PyTorch 经 /whl/cpu 真实安装且 import torch 成功 (amd64 架构)",
-          "404 请求回退至 pypi-org 或返回标准 HTTP 404 兜底"
+          "空 venv 中经 /whl/cpu 安装固定 CPU PyTorch 及解析到的依赖并执行张量计算 (amd64)",
+          "人工可选 torch/filelock/jinja2 各一个 wheel 字节 SHA-256 抽样，公布 metadata hash 时额外校验；不代表全量依赖",
+          "虚构包 HTTP 404；回源层级另作证据，不以 404 单独证明回退",
+          "空目标目录真实下载 idna==3.10，验证 pip 客户端备用内网索引恢复"
         ],
         "soft": [
           "响应头包含 X-Pypi-Cache (MISS -> HIT)"
@@ -43,9 +45,10 @@
       "target_clusters": "all",
       "assertions": {
         "hard": [
-          "apt-get update -y 经 8081 成功刷新索引",
-          "apt-get install -y 真实安装 git, zstd, gcc, cmake 构建依赖",
-          "安装工具链二进制可执行且版本可读取"
+          "空 lists 仅经内网 8081 刷新索引，APT::Update::Error-Mode=any",
+          "清空包缓存并 --reinstall git, zstd, gcc, cmake，断言内网下载证据",
+          "安装工具链二进制可执行且版本可读取",
+          "独立 lists/archive 下容忍 loopback 故障源，断言有效内网索引与 git deb 真实下载"
         ],
         "soft": [],
         "probe": [
@@ -91,9 +94,10 @@
       "target_clusters": "all",
       "assertions": {
         "hard": [
-          "dnf/yum makecache 经 8083 成功生成元数据缓存",
-          "dnf/yum install -y 真实安装 git 与 zstd 成功",
-          "git --version 与 zstd --version 可执行"
+          "空 cachedir 仅经内网 8083 makecache 且元数据非空，不跳过失败 repo",
+          "dnf install/reinstall git 与 zstd 成功并留存真实 RPM 下载证据",
+          "git --version 与 zstd --version 可执行",
+          "独立 cachedir 的双 baseurl 恢复：首 loopback 源失败、有效元数据及 RPM 真实下载"
         ],
         "soft": [],
         "probe": [
@@ -111,11 +115,12 @@
       "workflow": ".github/workflows/e2e-feature-crates-cache.yml",
       "engine_scenario": "crates",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": "all",
+      "target_clusters": ["gy-006"],
       "assertions": {
         "hard": [
           "config.json 中 dl 路径重写为内网 8085 缓存服务",
-          "cargo build 成功拉取 sparse 索引并编译第三方 crate (anyhow)",
+          "空 registry 缓存 cargo build 下载固定 anyhow==1.0.75 并编译",
+          "清除 target 后 cargo build --offline 真实重建",
           "编译生成的二进制正确执行并输出预期内容"
         ],
         "soft": [
@@ -125,6 +130,29 @@
         "probe": [
           "上游 403 Access Denied 官方兜底机制 (PR #1722)"
         ]
+      }
+    },
+    {
+      "id": "TC-FEAT-GO",
+      "name": "Go module 冷缓存下载、固定校验和与运行",
+      "category": "platform-feature",
+      "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
+      "service_port": 8084,
+      "client": ["go"],
+      "workflow": ".github/workflows/e2e-feature-go-cache.yml",
+      "engine_scenario": "go",
+      "default_container": "golang:1.23-bookworm",
+      "target_clusters": "manual-single-cluster",
+      "assertions": {
+        "hard": [
+          "空 GOMODCACHE 仅经内网 8084 下载 rsc.io/quote@v1.5.2 及依赖",
+          "固定 go.sum 校验与 go mod verify 成功；GOSUMDB=off 不验证外部校验服务",
+          "下载后 GOPROXY=off 真实 go run 输出预期字串",
+          "独立空缓存 loopback 故障代理后由内网备用代理真实下载并运行",
+          "真实模块 HTTP 200 与 X-Go-Cache 响应头"
+        ],
+        "soft": ["第二次请求 HIT"],
+        "probe": ["虚构模块 HTTP 404；nginx 回源层级无证据为 not_verified"]
       }
     },
     {

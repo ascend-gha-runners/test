@@ -138,7 +138,10 @@ jobs:
           for base in (os.path.join(cache_root, "hub", "models"), os.path.join(cache_root, "hub")):
               if not os.path.isdir(base):
                   continue
+              is_hub_base = base == os.path.join(cache_root, "hub")
               for org in sorted(os.listdir(base)):
+                  if is_hub_base and org == "models":
+                      continue  # hub/models 是新布局容器目录，不是 org
                   orgdir = os.path.join(base, org)
                   if not os.path.isdir(orgdir) or org.startswith("."):
                       continue
@@ -241,7 +244,7 @@ jobs:
                           sys.exit(1)
           PYEOF
           echo "=== 缓存卷占用情况 ==="
-          du -sh /root/.cache/modelscope 2>/dev/null
+          du -sh ~/.cache/modelscope 2>/dev/null || true
           echo "PASS: 模型权重存量缓存抽检验证通过"
 
       - name: 包缓存端口探针（8081 deb / 8082 rustup / 8084 go）

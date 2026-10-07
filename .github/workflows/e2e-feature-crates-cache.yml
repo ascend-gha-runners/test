@@ -13,7 +13,7 @@ name: e2e-feature-crates-cache
 
 on:
   schedule:
-    # 每天 UTC 19:30（北京时间 03:30，凌晨错峰）全集群 crates.io 缓存（Port 8085）验证
+    # 每天 UTC 19:30（北京时间 03:30，凌晨错峰）gy-006 已审核的 8085 部署验证
     - cron: "30 19 * * *"
   workflow_dispatch:
     inputs:
@@ -77,23 +77,17 @@ jobs:
           target_cluster = "${{ inputs.cluster || 'all' }}"
           target_type = "${{ inputs.runner_type || 'all' }}"
 
-          selected = []
-          for r in runners:
-              if target_cluster != "all":
-                  if r.get("cluster") != target_cluster and not (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
-                      continue
-              if target_type != "all" and r.get("type") != target_type:
-                  continue
-              selected.append(r)
-
-          if not selected and target_cluster != "all":
-              for r in runners:
-                  if r.get("cluster") == target_cluster or (target_cluster in ("wlcb", "wlcb-001") and r.get("cluster") in ("wlcb", "wlcb-001")):
-                      selected.append(r)
-
+          # Only gy-006 has a reviewed 8085 deployment. Other clusters are
+          # not_verified, not claimed absent or silently redirected.
+          selected = [r for r in runners
+                      if target_cluster in ("all", "gy-006")
+                      and r.get("cluster") == "gy-006"
+                      and (target_type == "all" or r.get("type") == target_type)]
           if not selected:
-              print(f"Error: No runners matched filter (cluster={target_cluster}, type={target_type})", file=sys.stderr)
-              sys.exit(1)
+              message = f"not_verified: cluster={target_cluster}, type={target_type}; no matching reviewed 8085 target (reviewed cluster: gy-006)."
+              print(message)
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(message + "\n")
 
           matrix_json = json.dumps({"include": selected})
           print(f"Selected {len(selected)} runners: {matrix_json}")
@@ -105,8 +99,12 @@ jobs:
   run-crates-cache-e2e:
     name: "${{ matrix.name }} [${{ matrix.cluster }}]"
     needs: matrix-setup
+    if: ${{ needs.matrix-setup.outputs.count != '0' }}
     runs-on: ${{ matrix.labels }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
@@ -126,28 +124,34 @@ jobs:
           echo "Arch:    $(uname -m)"
 
       - name: 【基础功能】1. 诊断 crates.io 缓存（8085）：验证 config.json 与 dl 改写
+        id: primary-index
         run: |
           CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           echo "=== 请求 sparse index config.json ==="
-          raw=$(curl -si --max-time 20 "${CRATES_ENDPOINT}/index/config.json" | tr -d '\r')
-          echo "$raw" | head -n 15
-
-          tier=$(echo "$raw" | grep -i '^x-cache-tier:' | awk '{print $2}')
+          set -eu
+          curl -fsS --max-time 20 -D /tmp/crates-config.headers "${CRATES_ENDPOINT}/index/config.json" -o /tmp/crates-config.json
+          cat /tmp/crates-config.json
+          EXPECTED_DL="${CRATES_ENDPOINT}/api/v1/crates" python3 - <<'PY'
+          import json, os
+          with open('/tmp/crates-config.json') as f:
+              config = json.load(f)
+          dl = config.get('dl', '')
+          expected = os.environ['EXPECTED_DL']
+          assert dl == expected or dl.startswith(expected + '/'), f'Non-internal crate download URL: {dl!r}'
+          PY
+          tier=$(awk 'tolower($1) == "x-cache-tier:" {gsub("\r", "", $2); print $2}' /tmp/crates-config.headers)
           echo "config.json X-Cache-Tier: ${tier:-<absent>}"
           if [ "$tier" = "rsproxy" ]; then
             echo "✓ config.json 由 rsproxy 一级源稳定服务"
           fi
 
-          if echo "$raw" | grep -q "${CRATES_ENDPOINT}/api/v1/crates"; then
-            echo "✓ config.json 中 dl 下载路径已成功改写回内网缓存"
-          elif [ -z "$tier" ]; then
-            echo "::warning::X-Cache-Tier 未注入且 dl 路径未改写，上游集群配置尚未完全同步，降级跳过 (参考 AGENTS.md 规范)"
-          else
-            echo "::error::dl 路径未正确改写回内网缓存地址!"
-            exit 1
+          if [ "$tier" != "rsproxy" ]; then
+            echo "::warning::config.json X-Cache-Tier=${tier:-<absent>} (soft cache-header probe)"
           fi
+          echo "✓ config.json 中 dl 下载路径已成功改写回内网缓存"
 
       - name: 【用户视角场景】2. 准备 Rust 工具链
+        id: toolchain
         env:
           RUSTUP_DIST_SERVER: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup
           RUSTUP_UPDATE_ROOT: http://${{ inputs.cache_host || 'cache-service.nginx-pypi-cache.svc.cluster.local' }}:8082/rustup/rustup
@@ -162,29 +166,34 @@ jobs:
           /root/.cargo/bin/rustc --version
 
       - name: 【用户视角场景】3. 按照文档与项目规范配置 Cargo sparse 镜像源
+        id: source-config
         run: |
-          mkdir -p /root/.cargo
-          cat > /root/.cargo/config.toml <<EOF
+          set -eu
+          # Keep toolchain binaries in /root/.cargo/bin, but isolate registry state.
+          CARGO_HOME=$(mktemp -d /tmp/cargo-registry.XXXXXX)
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          cat > "$CARGO_HOME/config.toml" <<EOF
           [source.crates-io]
           replace-with = "huaweicloud"
 
           [source.huaweicloud]
           registry = "sparse+http://${CACHE_HOST}:8085/index/"
           EOF
-          echo "=== /root/.cargo/config.toml ==="
-          cat /root/.cargo/config.toml
+          echo "=== Isolated Cargo registry configuration ==="
+          cat "$CARGO_HOME/config.toml"
 
       - name: 【用户视角场景】4. 真实工程创建并拉取依赖编译运行（anyhow）
+        id: primary-download
         run: |
           workdir="/tmp/cargo_e2e_app"
           rm -rf "$workdir"
           /root/.cargo/bin/cargo new --bin "$workdir"
           cd "$workdir"
 
-          echo 'anyhow = "1.0.75"' >> Cargo.toml
+          echo 'anyhow = "=1.0.75"' >> Cargo.toml
 
           cat > src/main.rs <<'EOF'
-          use anyhow::{Result, Context};
+          use anyhow::Result;
 
           fn main() -> Result<()> {
               println!("✓ Cargo sparse crate build & execute test SUCCESS via internal 8085 mirror!");
@@ -196,16 +205,22 @@ jobs:
           /root/.cargo/bin/cargo build
 
           echo "=== 运行编译出的二进制文件 ==="
-          ./target/debug/cargo_e2e_app
+          ./target/debug/cargo_e2e_app > /tmp/cargo-actual.stdout
+          printf '%s\n' '✓ Cargo sparse crate build & execute test SUCCESS via internal 8085 mirror!' > /tmp/cargo-expected.stdout
+          cmp /tmp/cargo-expected.stdout /tmp/cargo-actual.stdout
+          cat /tmp/cargo-actual.stdout
+          find "$CARGO_HOME/registry/cache" -type f -name 'anyhow-1.0.75.crate' -size +0c | grep -q .
 
       - name: 【基础功能】5. 校验 crate 下载缓存头（X-Crates-Cache MISS -> HIT）
         run: |
           CRATES_ENDPOINT="http://${CACHE_HOST}:8085"
           test_pkg_url="${CRATES_ENDPOINT}/api/v1/crates/anyhow/1.0.75/download"
           echo "=== 请求 crate 下载地址 (第 1 次) ==="
-          h1=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+          curl -sS -o /dev/null -D /tmp/crates-h1 --max-time 30 "$test_pkg_url" || echo '::warning::Cache header probe request failed'
+          h1=$(awk 'tolower($1) == "x-crates-cache:" {gsub("\r", "", $2); print $2}' /tmp/crates-h1)
           echo "=== 请求 crate 下载地址 (第 2 次) ==="
-          h2=$(curl -s -o /dev/null -D - --max-time 30 "$test_pkg_url" | grep -i x-crates-cache | tr -d '\r' | awk '{print $2}')
+          curl -sS -o /dev/null -D /tmp/crates-h2 --max-time 30 "$test_pkg_url" || echo '::warning::Cache header probe request failed'
+          h2=$(awk 'tolower($1) == "x-crates-cache:" {gsub("\r", "", $2); print $2}' /tmp/crates-h2)
 
           echo "X-Crates-Cache: 1st=${h1:-<none>}, 2nd=${h2:-<none>}"
           if [ "$h1" = "MISS" ]; then
@@ -215,17 +230,22 @@ jobs:
           elif [ "$h1" = "HIT" ] || [ "$h2" = "HIT" ]; then
             echo "✓ 缓存命中: HIT"
           fi
+          if [ "$h2" != "HIT" ]; then
+            echo "::warning::Second request X-Crates-Cache=${h2:-<absent>} (soft cache-header probe)"
+          fi
           echo "✓ crates.io Cache 8085 feature verified successfully on ${{ matrix.cluster }}!"
 
       - name: 【基础功能】6. 异常场景：404 虚构 crate 请求与回源断言
+        id: protocol-negative
         run: |
           echo "=== 探测 8085 端点虚构 crate，验证回源后返回 403/404 ==="
           bogus_crate="e2e-bogus-crate-${GITHUB_RUN_ID}"
-          resp=$(curl -si --max-time 20 "http://${CACHE_HOST}:8085/api/v1/crates/${bogus_crate}/download" || true)
-          echo "$resp" | head -n 12
-          tier=$(echo "$resp" | grep -i "X-Cache-Tier" | awk '{print $2}' | tr -d '\r')
-          echo "虚构 crate 响应回源层级: ${tier:-<absent>}"
-          if echo "$resp" | grep -qE "403|404"; then
+          status=$(curl -sS --max-time 20 -D /tmp/crates-bogus.headers -o /tmp/crates-bogus.body -w '%{http_code}' "http://${CACHE_HOST}:8085/api/v1/crates/${bogus_crate}/1.0.0/download")
+          head -n 12 /tmp/crates-bogus.headers
+          tier=$(awk 'tolower($1) == "x-cache-tier:" {gsub("\r", "", $2); print $2}' /tmp/crates-bogus.headers)
+          echo "虚构 crate HTTP=$status 回源层级: ${tier:-<absent>}"
+          if [ -z "$tier" ]; then echo '::warning::Missing X-Cache-Tier (soft probe)'; fi
+          if [ "$status" = "403" ] || [ "$status" = "404" ]; then
             echo "✓ 8085 虚构 crate 正确返回 403/404（crates-official S3 规范响应）"
           else
             echo "::error::8085 端点未能返回 403/404 响应"
@@ -233,15 +253,35 @@ jobs:
           fi
 
       - name: 【基础功能】7. 异常场景：客户端容灾降级（故障镜像环境下的离线逃生）
+        id: client-fallback
         run: |
           echo "=== 验证 cargo 离线逃生能力（在缓存/镜像异常时直接复用已下载依赖）==="
           cd /tmp/cargo_e2e_app
-          cargo build --offline > /tmp/cargo_offline 2>&1 && success=true || success=false
+          set -eu
+          # No artifacts survive: --offline must rebuild from downloaded registry bytes.
+          rm -rf target
+          cargo build --offline --locked > /tmp/cargo_offline 2>&1
           cat /tmp/cargo_offline
-          if [ "$success" = "true" ]; then
-            echo "✓ cargo offline 离线逃生测试通过"
-          else
-            echo "::error::cargo offline 离线构建失败!"
-            exit 1
-          fi
-          echo "✓ crates.io 客户端容灾测试通过"
+          ./target/debug/cargo_e2e_app > /tmp/cargo-offline.stdout
+          cmp /tmp/cargo-expected.stdout /tmp/cargo-offline.stdout
+          echo "✓ cargo offline 离线重新构建及运行测试通过"
+          echo "✓ crates.io 客户端离线重建通过（不代表 nginx 上游故障切换）"
+
+      - name: 硬断言结果汇总（离线重建不代表 nginx 上游切换）
+        if: ${{ always() }}
+        env:
+          HARD_STEPS: ${{ toJSON(steps) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          steps = json.loads(os.environ['HARD_STEPS'])
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### Crates hard assertions\n| Check | Result |\n|---|---|\n')
+              for name in ('primary-index', 'toolchain', 'source-config', 'primary-download', 'protocol-negative', 'client-fallback'):
+                  outcome = steps.get(name, {}).get('outcome', 'skipped')
+                  result = {'success': 'pass', 'failure': 'fail'}.get(outcome, 'not_verified')
+                  summary.write(f'| {name} | {result} |\n')
+              summary.write('Reviewed gy-006 only. Client offline rebuild is not nginx upstream failover evidence; cache headers are soft probes.\n')
+          PY
+          case "$CARGO_HOME" in /tmp/cargo-registry.*) rm -rf "$CARGO_HOME" ;; esac
+          rm -rf /tmp/cargo_e2e_app
