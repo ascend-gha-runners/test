@@ -1,0 +1,55 @@
+name: debug-sleep-runner
+# 调试工具：dispatch 后按 label 占住一台 runner，持续指定时长（默认 10 分钟）。
+# 期间 runner 不会释放，可 kubectl exec 进入 job pod 查看现场
+# （容器环境、挂载、缓存目录、网络等），到时自动退出释放。
+#
+# 用法：
+#   gh workflow run debug-sleep-runner.yml --repo ascend-gha-runners/test \
+#     -f runner-label=linux-aarch64-a2-1-gy001 -f sleep-minutes=10
+#
+# 注意：sleep-minutes 越大 timeout 越长，长时间占用会阻塞该 label 的其他作业；
+# runner-label 写错时 job 会一直 Pending 排队（同 e2e-new-runner）。
+on:
+  workflow_dispatch:
+    inputs:
+      runner-label:
+        description: '目标 runner 能力 label'
+        required: true
+        default: 'linux-aarch64-cpu-4'
+        type: string
+      sleep-minutes:
+        description: '占用时长（分钟）'
+        required: false
+        default: '10'
+        type: string
+      container-image:
+        description: 'job 容器镜像'
+        required: true
+        default: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11'
+        type: string
+
+jobs:
+  sleep:
+    # timeout 随 sleep-minutes 动态增长（+10 分钟余量）
+    timeout-minutes: ${{ fromJSON(inputs.sleep-minutes) + 10 }}
+    runs-on: "${{ inputs.runner-label }}"
+    container:
+      image: ${{ inputs.container-image }}
+    steps:
+      - name: 调试信息（pod 定位与环境概览）
+        run: |
+          echo "=========================================="
+          echo "pod:   $(cat /etc/hostname 2>/dev/null || uname -n)"
+          echo "arch:  $(uname -m)  kernel: $(uname -r)"
+          grep PRETTY_NAME /etc/os-release || true
+          echo "label: ${{ inputs.runner-label }}"
+          echo "=========================================="
+          echo "占用期间可 exec 进入本 pod 查看现场："
+          echo "  kubectl exec -it <pod名> -n <runner所在namespace> -- bash"
+
+      - name: Sleep ${{ inputs.sleep-minutes }} 分钟（占住 runner）
+        run: |
+          minutes=${{ inputs.sleep-minutes }}
+          echo "开始占用 $(date '+%F %T')，持续 ${minutes} 分钟，到时自动释放..."
+          sleep $(( minutes * 60 ))
+          echo "结束占用 $(date '+%F %T')，runner 即将释放"
