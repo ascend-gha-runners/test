@@ -30,8 +30,9 @@ on:
 
 jobs:
   sleep:
-    # timeout 随 sleep-minutes 动态增长（+10 分钟余量）
-    timeout-minutes: ${{ fromJSON(inputs.sleep-minutes) + 10 }}
+    # GitHub 的 timeout-minutes 不支持算术表达式，固定 120；
+    # sleep-minutes 在步骤内 clamp 到上限 110，保证留有余量
+    timeout-minutes: 120
     runs-on: "${{ inputs.runner-label }}"
     container:
       image: ${{ inputs.container-image }}
@@ -50,6 +51,10 @@ jobs:
       - name: Sleep ${{ inputs.sleep-minutes }} 分钟（占住 runner）
         run: |
           minutes=${{ inputs.sleep-minutes }}
+          if [ "$minutes" -gt 110 ]; then
+            echo "WARN: sleep-minutes 上限 110，已按 110 执行"
+            minutes=110
+          fi
           echo "开始占用 $(date '+%F %T')，持续 ${minutes} 分钟，到时自动释放..."
           sleep $(( minutes * 60 ))
           echo "结束占用 $(date '+%F %T')，runner 即将释放"
