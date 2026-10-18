@@ -34,6 +34,19 @@
 - 若某集群显式钉死了 Listener 镜像，必须一并处理，否则 Listener 不会跟随。
 - 版本一致性：仓库规范要求 Runner Scale Set 版本与 Controller 版本一致；本 SOP 将其作为独立校验项。
 
+### 3.1 镜像与 chart 来源（升级前必须先打通）
+
+集群节点不直连官方 `ghcr.io`，容器镜像统一从内部 SWR 拉取。三类镜像来源链路不同，升级前逐条确认：
+
+| 镜像 | SWR 地址（示例） | 来源链路 | 升级前动作 |
+| --- | --- | --- | --- |
+| Runner 基础镜像 | `swr.cn-southwest-2.myhuaweicloud.com/base_image/actions/actions-runner:<ver>` | 配置仓库 `opensourceways/ascend-ci-deployment` 的 `.github/workflows/sync-images.yml`：skopeo 从 `ghcr.io/actions/actions-runner` 同步到 `REGISTRY_GUIYANG`（swr.cn-southwest-2）与 `REGISTRY_CN_EAST4`（swr.cn-east-4），每日 00:00 定时 + 手动 dispatch | 在 workflow 的 `matrix.runner_version` 中加入目标版本，合入后确认 SWR 已出现该 tag |
+| Controller / Listener 定制镜像 | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/gha-runner-scale-set-controller:<tag>`（如 `0.14.201`） | **无自动同步链路**：`modelfoundry` 定制构建（tag 非上游版本号，`0.14.201` ≠ 上游 `0.14.2`）；`sync-images.yml` 的 helm/controller 同步 job 处于注释状态；`ascend-gha-runners/sync-tools` 的 `image-sync.json` 不含 ARC 镜像 | 先确认 `modelfoundry` 侧已构建并推送目标版本镜像；尚未构建则先推动出包（或经评审临时改用上游镜像），否则升级无法进行 |
+| Runner hooks 镜像 | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/runner-containers-hooks:release-<ver>-<commit>` | 同上，`modelfoundry` 定制构建 | 与 Controller 镜像一并确认 |
+| 业务 AI 镜像（cann / vllm-ascend / sglang / verl 等） | `swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/<project>/...` | `ascend-gha-runners/sync-tools`（`image-sync.json` 配置驱动，每小时同步，digest 比对相同则跳过） | 与 Controller 升级无关，通常无需动作 |
+
+Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存（新目录多为官方源）。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 镜像存在同步延迟）。
+
 ## 4. 标准四步流程
 
 ```
@@ -72,6 +85,9 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 #### 1.3 前置检查清单
 
 - [ ] 目标镜像 `<TARGET_VERSION>` 已同步到所用镜像仓库，且支持集群所需架构（amd64 / aarch64）
+  - Runner 基础镜像：确认 `sync-images.yml` 的 matrix 已包含目标版本，且 SWR 已出现对应 tag（见 3.1）
+  - Controller / Listener / hooks 定制镜像（`modelfoundry/*`）：**无自动同步链路**，确认定制构建已完成并推送（见 3.1）
+- [ ] 若涉及 chart 版本变更：目标 chart 在所选依赖源（官方 ghcr.io / NJU 镜像）上已可得（见 3.1）
 - [ ] 目标 chart / manifest 已存在于配置仓库
 - [ ] 已确认 CRD 从当前版本到目标版本无破坏性变更
 - [ ] 已确认升级附带的 RBAC / 其他资源变化（新增权限需评审接受）
