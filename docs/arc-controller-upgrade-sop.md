@@ -34,6 +34,24 @@
 - 若某集群显式钉死了 Listener 镜像，必须一并处理，否则 Listener 不会跟随。
 - 版本一致性：仓库规范要求 Runner Scale Set 版本与 Controller 版本一致；本 SOP 将其作为独立校验项。
 
+### 3.1 镜像与 chart 来源（升级前必须先打通）
+
+集群节点不直连官方 `ghcr.io`。Controller 镜像的**标准来源是 NJU ghcr 镜像**（上游 `ghcr.io/actions/*` 的 pull-through 镜像，上游每个版本自动可得，无需构建/推送）；`modelfoundry` 定制构建只是部分集群的历史例外。升级前逐条确认：
+
+| 镜像 | 标准来源 | 来源链路 | 升级前动作 |
+| --- | --- | --- | --- |
+| Controller / Listener（标准） | `ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<上游tag>`（如 `0.14.2`） | NJU 对上游的 pull-through 镜像，上游发布后自动可得（存在同步延迟）。`manifests/arc-controller-*/values.yaml` 的 chart 默认 repository 即为 NJU，未显式覆盖的集群（hk001、huabei-003、hb-003-verl 等）天然走此路径 | `docker manifest inspect ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>` 匿名确认目标 tag 已同步（已验证：`0.13.1`/`0.14.0`/`0.14.1`/`0.14.2`/`0.15.0` 均可得；定制 tag `0.14.201` 不在 NJU） |
+| Controller / Listener（例外：定制构建） | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/gha-runner-scale-set-controller:0.14.201` | `modelfoundry` 定制构建，**无自动同步链路**（`sync-images.yml` 的 controller/chart 同步 job 自 #240 起被注释，目标路径从未被任何集群引用；`sync-tools` 不含 ARC 镜像） | 仅钉在定制镜像的集群（gy001、gy005、cn12-001、sglang、gy006 等）需要。**已确认（2026-10-18）：`0.14.201` 为适配 liqo 的定制构建，其改动无需带入 0.15.0+**——升级到 0.15.0 及以上时可直接切 NJU 上游镜像，无需等待 modelfoundry 出包；仅升级 0.14.x 补丁版本时才需要 modelfoundry 配合 |
+| Runner 基础镜像 | `swr.cn-southwest-2.myhuaweicloud.com/base_image/actions/actions-runner:<ver>` | 配置仓库 `opensourceways/ascend-ci-deployment` 的 `.github/workflows/sync-images.yml`：skopeo 从 `ghcr.io/actions/actions-runner` 同步到 `REGISTRY_GUIYANG`（swr.cn-southwest-2）与 `REGISTRY_CN_EAST4`（swr.cn-east-4），每日 00:00 定时 + 手动 dispatch | 在 workflow 的 `matrix.runner_version` 中加入目标版本，合入后确认 SWR 已出现该 tag |
+| Runner hooks 镜像 | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/runner-containers-hooks:release-<ver>-<commit>` | `modelfoundry` 定制构建，与 Controller 升级解耦 | 通常无需动作；仅 runner 镜像变更时确认 |
+| 业务 AI 镜像（cann / vllm-ascend / sglang / verl 等） | `swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/<project>/...` | `ascend-gha-runners/sync-tools`（`image-sync.json` 配置驱动，每小时同步，digest 比对相同则跳过） | 与 Controller 升级无关，通常无需动作 |
+
+> 历史注记：`sync-images.yml` 的 `sync-helm` job（controller 镜像 + chart 推 SWR `base_image/` 路径）在 opensourceways/ascend-ci-deployment#240 中尝试后因上传反复失败被注释保留至今，其目标路径经探测在 cn-southwest-2 / cn-east-4 均不存在，从未被任何集群引用；不要把该路径当作可用的镜像来源，也不要基于它规划升级。
+
+Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 存在同步延迟）。
+
+Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存（新目录多为官方源）。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 镜像存在同步延迟）。
+
 ## 4. 标准四步流程
 
 ```
@@ -72,6 +90,10 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 #### 1.3 前置检查清单
 
 - [ ] 目标镜像 `<TARGET_VERSION>` 已同步到所用镜像仓库，且支持集群所需架构（amd64 / aarch64）
+  - Controller / Listener（标准路径）：`docker manifest inspect ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>` 确认 NJU 已同步目标 tag（匿名可查，见 3.1）
+  - Controller / Listener（例外：钉在 `modelfoundry` 定制镜像的集群）：`0.14.201` 为 liqo 适配定制、改动无需带入 0.15.0+（已确认）；升级到 0.15.0+ 直接切 NJU 上游镜像（见 3.1）
+  - Runner 基础镜像：确认 `sync-images.yml` 的 matrix 已包含目标版本，且 SWR 已出现对应 tag（见 3.1）
+- [ ] 若涉及 chart 版本变更：目标 chart 在所选依赖源（官方 ghcr.io / NJU 镜像）上已可得（见 3.1）
 - [ ] 目标 chart / manifest 已存在于配置仓库
 - [ ] 已确认 CRD 从当前版本到目标版本无破坏性变更
 - [ ] 已确认升级附带的 RBAC / 其他资源变化（新增权限需评审接受）
@@ -87,7 +109,7 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 
 - 若版本由 chart 路径切换控制：修改对应 Application 的 `spec.source.path` 指向目标版本目录。
 - 若版本由值控制：修改 `image.tag` 或依赖版本。
-- Listener：`listenerTemplate` 未硬编码镜像时无需改动；有硬编码时一并去钉死或对齐目标版本。
+- Listener：`listenerTemplate` 未硬编码镜像时无需改动；有硬编码时**优先去钉死**（删除 `listenerTemplate` 中的 image，使其跟随 Controller 镜像），确需保留时对齐目标版本。
 
 示例（chart 路径切换）：
 
