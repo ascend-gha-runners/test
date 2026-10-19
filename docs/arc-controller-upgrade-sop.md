@@ -48,9 +48,20 @@
 
 > 历史注记：`sync-images.yml` 的 `sync-helm` job（controller 镜像 + chart 推 SWR `base_image/` 路径）在 opensourceways/ascend-ci-deployment#240 中尝试后因上传反复失败被注释保留至今，其目标路径经探测在 cn-southwest-2 / cn-east-4 均不存在，从未被任何集群引用；不要把该路径当作可用的镜像来源，也不要基于它规划升级。
 
-Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 存在同步延迟）。
-
 Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存（新目录多为官方源）。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 镜像存在同步延迟）。
+
+### 3.2 0.15.0 关键行为变化（0.14.x → 0.15.0+ 升级适用）
+
+首次升级到 0.15.0 时（官方 release `gha-runner-scale-set-0.15.0`，2026-10-01）逐项核对；兼容性结论已在 gy006 金丝雀（opensourceways/ascend-ci-deployment#2030）与 [arc-karmada-test](https://github.com/pkking/arc-karmada-test) 验证：
+
+| 变化 | 影响 | 需要的动作 |
+| --- | --- | --- |
+| **原地升级取代旧升级策略**（#4516，breaking） | Runner spec 变更不再立即重建 Listener/EphemeralRunnerSet；先关停 scale set、等待空闲 runner 退出后再滚动，忙碌 runner 不被打断。§6.5 的“短中断”描述仅适用于 0.14.x | 无需配置；Controller values 中旧的 `flags.updateStrategy` 会被静默忽略，建议清理 |
+| **Runner 计数改走 metrics**（#4557/#4583） | AutoscalingRunnerSet/EphemeralRunnerSet 的 status 计数字段与 kubectl printer columns 移除 | 看板/告警如读 CR status 计数，改用 controller metrics（`metrics:` 对象配置方式不变） |
+| **Listener 漂移检测改为直接比较 Pod**（#4635/#4680/#4695） | 验收时确认 listener 不出现重建循环（日志无持续 patch） | 验收 §4.2 附加观察项 |
+| **chart 渲染期校验注解/标签**（#4637/#4639/#4640/#4679） | values 中注解值必须为字符串，裸整数/布尔会导致渲染失败 | 升级前核对 scale set values 的 annotations（gy006 已核对全部合规） |
+| **controller flag 变更**（#4670） | `runnerMaxConcurrentReconciles`、`updateStrategy` 移除，改为 per-controller 默认值（ASRS/Listener/ERS=2、ER=4） | 清理 wrapper values 中的死 flag（gy006 已清理） |
+| **CRD schema** | EphemeralRunner / EphemeralRunnerSet / AutoscalingRunnerSet 的 spec/status 无字段移除；`ephemeralrunners .status.phase`、`ephemeralrunnersets .spec.ephemeralRunnerSpec` 保持兼容 | zombie-runner-cleanup、monitoring cronjob 不受影响；CRD 由 ArgoCD 随 chart 应用（ServerSideApply） |
 
 ## 4. 标准四步流程
 
@@ -98,6 +109,7 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 - [ ] 已确认 CRD 从当前版本到目标版本无破坏性变更
 - [ ] 已确认升级附带的 RBAC / 其他资源变化（新增权限需评审接受）
 - [ ] 已确认 Runner Scale Set 版本是否需要同步对齐
+- [ ] 首次升级跨越 0.15.0：按 3.2 核对行为变化（清理被移除的 controller flag、核对 values 注解值为字符串、确认无监控读已移除的 status 计数字段）
 - [ ] 目标集群无大批 CI 任务在执行，已通知使用方
 - [ ] 已记录回退点（当前主干 commit）
 
@@ -198,7 +210,7 @@ git revert <本批 commit> --no-edit && git push origin HEAD:main
 2. **Listener 硬编码镜像**：若 Runner Scale Set 显式钉死 Listener 镜像，Controller 升级不会带动 Listener，必须一并处理。
 3. **CRD 升级**：Helm / ArgoCD 对 chart `crds/` 的升级行为需实测确认；必要时手动 apply。
 4. **RBAC 新增**：升级可能附带新增集群级权限，需安全评审。
-5. **短中断**：单副本 Controller 升级瞬间暂停新 runner 注册，建议安排低峰。
+5. **短中断**：0.14.x 单副本 Controller 升级瞬间暂停新 runner 注册，建议安排低峰；**0.15.0 起为原地升级语义（#4516，见 3.2）**——Runner spec 变更先关停 scale set、等待空闲 runner 退出后再滚动，忙碌 runner 不被打断，低峰要求可放宽，但仍建议避开业务高峰。
 6. 每批升级间隔观察，禁止一次性全量。
 
 ## 7. 记录表
