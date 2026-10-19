@@ -87,7 +87,12 @@
 
 注意：`sync-images.yml` 的 `sync-helm` job 已被注释（PR opensourceways/ascend-ci-deployment#240）。其目标路径 `base_image/actions/gha-runner-scale-set-controller` 从未生效。2026-10-18 探测结果：cn-southwest-2 与 cn-east-4 两个 region 均不存在该路径。不要使用该路径。
 
-Helm chart 的拉取发生在 ArgoCD 与 CI 侧，不经过集群节点。chart 依赖源有两个：官方 `oci://ghcr.io/actions/actions-runner-controller-charts`（新目录使用）与 NJU `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts`（部分旧目录使用）。升级前确认所选源包含目标版本。
+Helm chart 的拉取发生在 ArgoCD 与 CI 侧，不经过集群节点。
+
+Helm chart 依赖源规则：
+- 标准源：NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts`。新增 chart 与版本升级一律使用此源。
+- 回退源：官方 `oci://ghcr.io/actions/actions-runner-controller-charts`。仅 NJU 未同步目标版本且升级紧急时使用。使用时在 PR 描述记录原因。
+- 升级前确认目标版本在所选源上可得（NJU 存在同步延迟）。验证命令：`docker manifest inspect ghcr.nju.edu.cn/actions/actions-runner-controller-charts/<chart 名>:<version>`。示例：`.../gha-runner-scale-set:0.15.0`（Runner Scale Set chart）、`.../gha-runner-scale-set-controller:0.15.0`（Controller chart）。两个制品的 0.15.0 版本已验证可得（2026-10-18）。
 
 ### 3.2 0.15.0 行为变化（0.14.x → 0.15.0+ 升级适用）
 
