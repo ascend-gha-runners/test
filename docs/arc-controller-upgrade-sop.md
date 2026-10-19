@@ -1,129 +1,181 @@
 # ARC Controller 升级 SOP
 
+## 0. 术语表
+
+本文使用下表中的术语。每个术语在全文中含义唯一。
+
+| 术语 | 含义 |
+| --- | --- |
+| Controller | GitHub Actions Runner Controller 的控制器组件。Deployment 名称格式：`<release>-gha-rs-controller` |
+| Listener | 每个 Runner Scale Set 对应一个的事件监听 Pod，由 Controller 创建 |
+| Runner Scale Set | 一组 runner 对应的 Helm release。示例：`linux-aarch64-a2-1-gy006` |
+| 包装 chart | 配置仓库中包含上游依赖 chart 的目录。示例：`manifests/arc-controller-0.15.0` |
+| 配置仓库 | `opensourceways/ascend-ci-deployment`（GitOps 仓库） |
+| NJU 镜像 | `ghcr.nju.edu.cn`。上游 `ghcr.io` 的 pull-through 镜像 |
+| SWR | 华为云镜像仓库。本文使用 `swr.cn-southwest-2.myhuaweicloud.com` |
+| 基线 | 升级前采集的 Listener 名称与状态清单。验收时用作对照 |
+| 金丝雀 | 每批升级的第一个集群。承担验证任务 |
+
 ## 1. 目的
 
-规范各集群 GitHub Actions Runner Controller（ARC，`gha-runner-scale-set`）的 Controller / Listener 升级操作，统一走 GitOps 流程，做到可评审、可追溯、可快速回退。
+本文规定 Controller 与 Listener 的升级操作。
+
+所有操作通过 GitOps 执行：变更进入配置仓库，ArgoCD 完成同步。
+
+此流程给出三个保证：
+- 每个变更经评审后合入。
+- 每个变更对应一个 commit，可追溯。
+- 回退操作是 revert，不在集群上手工修改。
 
 ## 2. 适用范围
 
-所有使用 ARC 的集群。单次变更建议按「金丝雀（1 个非关键集群）→ 灰度（2~3 个）→ 全量」分批推进，每批验收通过后再进入下一批。
+本文适用于所有安装 ARC 的集群。
 
-以下命令中的占位符在实例化时替换：
+每批升级按此顺序执行：
+1. 金丝雀：1 个集群。
+2. 灰度：2~3 个集群。
+3. 全量：其余集群。
 
-- `<KUBECONFIG>`：目标集群 kubeconfig
-- `<TARGET_VERSION>`：目标版本，如 `0.14.2`
-- `<RELEASE>`：Controller 的 Helm release 名（通常为 `arc`）
-- `<CONTROLLER_NAMESPACE>`：Controller 命名空间（通常为 `arc-systems`）
+规则：上一批验收全部通过后，才开始下一批。禁止一次升级全部集群。
+
+### 2.1 占位符
+
+执行命令前，用下表的值替换占位符：
+
+| 占位符 | 含义 | 获取方式 |
+| --- | --- | --- |
+| `<KUBECONFIG>` | 目标集群的 kubeconfig 文件路径 | 集群清单 |
+| `<TARGET_VERSION>` | 目标版本。示例：`0.15.0` | 升级计划 |
+| `<RELEASE>` | Controller 的 Helm release 名。当前值为 `arc` | ArgoCD Application 的 `spec.source.helm.releaseName` 字段 |
+| `<CONTROLLER_NAMESPACE>` | Controller 的命名空间。当前值为 `arc-systems` | ArgoCD Application 的 `spec.destination.namespace` 字段 |
 
 ## 3. 版本关联关系
 
-理解清楚「什么随 Controller 版本变化」是避免漏升级 / 误升级的前提：
+升级前阅读本节。本节回答一个问题：Controller 版本变化时，哪些对象跟随变化。
 
-| 对象 | 说明 | 是否随 Controller 版本 |
+| 对象 | 是否跟随 Controller 版本 | 说明 |
 | --- | --- | --- |
-| Controller Deployment | `<release>-gha-rs-controller` | 是 |
-| Listener | 由 Controller 运行时按 Runner Scale Set 的 `listenerTemplate` 创建；未显式指定镜像时，**镜像 = Controller 镜像** | 是（自动） |
-| Controller chart 自带 RBAC / Service | 随 chart | 随 chart |
-| CRD（`actions.github.com/*`） | 随 chart `crds/` | 需单独确认是否更新 |
-| Runner Scale Set（`gha-runner-scale-set` chart） | 独立版本 | 否 |
-| Runner 镜像 | 独立 | 否 |
+| Controller Deployment（`<release>-gha-rs-controller`） | 是 | 镜像由包装 chart 的 values 控制 |
+| Listener | 是（自动） | Controller 按 Runner Scale Set 的 `listenerTemplate` 创建。`listenerTemplate` 未指定 image 时，Listener 镜像 = Controller 镜像 |
+| Controller chart 自带的 RBAC 与 Service | 是（随 chart） | 不需要单独操作 |
+| CRD（`actions.github.com/*` 共 4 个） | 需单独确认 | 随 chart 的 `crds/` 目录分发。ArgoCD 随 chart 同步应用 |
+| Runner Scale Set（`gha-runner-scale-set` chart） | 否 | 版本独立。要求：Runner Scale Set 版本 = Controller 版本 |
+| Runner 镜像（runner pod 使用） | 否 | 由 Runner Scale Set 的 values 显式指定 |
 
-结论：
+规则：
+- Runner Scale Set 的 `listenerTemplate` 未指定 image：升级 Controller 时，Listener 自动跟随。不需要修改 Listener。
+- Runner Scale Set 的 `listenerTemplate` 指定了 image：在同一 PR 内修改该 image，或删除该 image 声明。否则 Listener 不跟随，验收 §4.2 失败。
+- 保持 Runner Scale Set 版本 = Controller 版本。混用版本时，先获得评审记录。
 
-- 只要集群内 Runner Scale Set 的 `listenerTemplate` 未硬编码镜像，**升级 Controller 会同时把 Listener 升级到同一版本**，无需单独改 Listener。
-- 若某集群显式钉死了 Listener 镜像，必须一并处理，否则 Listener 不会跟随。
-- 版本一致性：仓库规范要求 Runner Scale Set 版本与 Controller 版本一致；本 SOP 将其作为独立校验项。
+### 3.1 镜像与 chart 来源
 
-### 3.1 镜像与 chart 来源（升级前必须先打通）
+集群节点不从官方 `ghcr.io` 拉取镜像。升级前，按下表确认每个对象的来源可用。
 
-集群节点不直连官方 `ghcr.io`。Controller 镜像的**标准来源是 NJU ghcr 镜像**（上游 `ghcr.io/actions/*` 的 pull-through 镜像，上游每个版本自动可得，无需构建/推送）；`modelfoundry` 定制构建只是部分集群的历史例外。升级前逐条确认：
-
-| 镜像 | 标准来源 | 来源链路 | 升级前动作 |
-| --- | --- | --- | --- |
-| Controller / Listener（标准） | `ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<上游tag>`（如 `0.14.2`） | NJU 对上游的 pull-through 镜像，上游发布后自动可得（存在同步延迟）。`manifests/arc-controller-*/values.yaml` 的 chart 默认 repository 即为 NJU，未显式覆盖的集群（hk001、huabei-003、hb-003-verl 等）天然走此路径 | `docker manifest inspect ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>` 匿名确认目标 tag 已同步（已验证：`0.13.1`/`0.14.0`/`0.14.1`/`0.14.2`/`0.15.0` 均可得；定制 tag `0.14.201` 不在 NJU） |
-| Controller / Listener（例外：定制构建） | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/gha-runner-scale-set-controller:0.14.201` | `modelfoundry` 定制构建，**无自动同步链路**（`sync-images.yml` 的 controller/chart 同步 job 自 #240 起被注释，目标路径从未被任何集群引用；`sync-tools` 不含 ARC 镜像） | 仅钉在定制镜像的集群（gy001、gy005、cn12-001、sglang、gy006 等）需要。**已确认（2026-10-18）：`0.14.201` 为适配 liqo 的定制构建，其改动无需带入 0.15.0+**——升级到 0.15.0 及以上时可直接切 NJU 上游镜像，无需等待 modelfoundry 出包；仅升级 0.14.x 补丁版本时才需要 modelfoundry 配合 |
-| Runner 基础镜像 | `swr.cn-southwest-2.myhuaweicloud.com/base_image/actions/actions-runner:<ver>` | 配置仓库 `opensourceways/ascend-ci-deployment` 的 `.github/workflows/sync-images.yml`：skopeo 从 `ghcr.io/actions/actions-runner` 同步到 `REGISTRY_GUIYANG`（swr.cn-southwest-2）与 `REGISTRY_CN_EAST4`（swr.cn-east-4），每日 00:00 定时 + 手动 dispatch | 在 workflow 的 `matrix.runner_version` 中加入目标版本，合入后确认 SWR 已出现该 tag |
-| Runner hooks 镜像 | `swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/runner-containers-hooks:release-<ver>-<commit>` | `modelfoundry` 定制构建，与 Controller 升级解耦 | 通常无需动作；仅 runner 镜像变更时确认 |
-| 业务 AI 镜像（cann / vllm-ascend / sglang / verl 等） | `swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/<project>/...` | `ascend-gha-runners/sync-tools`（`image-sync.json` 配置驱动，每小时同步，digest 比对相同则跳过） | 与 Controller 升级无关，通常无需动作 |
-
-> 历史注记：`sync-images.yml` 的 `sync-helm` job（controller 镜像 + chart 推 SWR `base_image/` 路径）在 opensourceways/ascend-ci-deployment#240 中尝试后因上传反复失败被注释保留至今，其目标路径经探测在 cn-southwest-2 / cn-east-4 均不存在，从未被任何集群引用；不要把该路径当作可用的镜像来源，也不要基于它规划升级。
-
-Helm chart 依赖源：仓库中官方 `oci://ghcr.io/actions/actions-runner-controller-charts` 与 NJU 镜像 `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts` 并存（新目录多为官方源）。chart 由 ArgoCD / CI 侧拉取，不经集群节点网络；涉及 chart 版本变更时，确认目标版本在所选源上已可得（NJU 镜像存在同步延迟）。
-
-### 3.2 0.15.0 关键行为变化（0.14.x → 0.15.0+ 升级适用）
-
-首次升级到 0.15.0 时（官方 release `gha-runner-scale-set-0.15.0`，2026-10-01）逐项核对；兼容性结论已在 gy006 金丝雀（opensourceways/ascend-ci-deployment#2030）与 [arc-karmada-test](https://github.com/pkking/arc-karmada-test) 验证：
-
-| 变化 | 影响 | 需要的动作 |
+| 镜像 | 来源 | 升级前动作 |
 | --- | --- | --- |
-| **原地升级取代旧升级策略**（#4516，breaking） | Runner spec 变更不再立即重建 Listener/EphemeralRunnerSet；先关停 scale set、等待空闲 runner 退出后再滚动，忙碌 runner 不被打断。§6.5 的“短中断”描述仅适用于 0.14.x | 无需配置；Controller values 中旧的 `flags.updateStrategy` 会被静默忽略，建议清理 |
-| **Runner 计数改走 metrics**（#4557/#4583） | AutoscalingRunnerSet/EphemeralRunnerSet 的 status 计数字段与 kubectl printer columns 移除 | 看板/告警如读 CR status 计数，改用 controller metrics（`metrics:` 对象配置方式不变） |
-| **Listener 漂移检测改为直接比较 Pod**（#4635/#4680/#4695） | 验收时确认 listener 不出现重建循环（日志无持续 patch） | 验收 §4.2 附加观察项 |
-| **chart 渲染期校验注解/标签**（#4637/#4639/#4640/#4679） | values 中注解值必须为字符串，裸整数/布尔会导致渲染失败 | 升级前核对 scale set values 的 annotations（gy006 已核对全部合规） |
-| **controller flag 变更**（#4670） | `runnerMaxConcurrentReconciles`、`updateStrategy` 移除，改为 per-controller 默认值（ASRS/Listener/ERS=2、ER=4） | 清理 wrapper values 中的死 flag（gy006 已清理） |
-| **CRD schema** | EphemeralRunner / EphemeralRunnerSet / AutoscalingRunnerSet 的 spec/status 无字段移除；`ephemeralrunners .status.phase`、`ephemeralrunnersets .spec.ephemeralRunnerSpec` 保持兼容 | zombie-runner-cleanup、monitoring cronjob 不受影响；CRD 由 ArgoCD 随 chart 应用（ServerSideApply） |
+| Controller / Listener（标准路径） | NJU 镜像：`ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>` | 执行 `docker manifest inspect ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>`。输出包含 manifest = 可用 |
+| Controller / Listener（例外路径） | SWR：`.../modelfoundry/gha-runner-scale-set-controller:0.14.201` | 仅适用于 0.14.x 补丁版本升级。升级到 0.15.0+：使用标准路径。原因见下文决策记录 |
+| Runner 基础镜像 | SWR：`.../base_image/actions/actions-runner:<ver>`，由配置仓库的 `sync-images.yml` 每日同步 | 在该 workflow 的 `matrix.runner_version` 中加入目标版本。合入后确认 SWR 出现该 tag |
+| Runner hooks 镜像 | SWR：`.../modelfoundry/runner-containers-hooks:<tag>` | 与 Controller 升级无关。仅 runner 镜像变更时操作 |
+| 业务 AI 镜像 | SWR：`.../base_image/ascend-ci/<project>/...`，由 `ascend-gha-runners/sync-tools` 每小时同步 | 无操作 |
 
-## 4. 标准四步流程
+事实说明（每条一个事实）：
+- NJU 是上游的 pull-through 镜像。上游发布后，NJU 自动获得该版本。存在同步延迟。
+- 配置仓库 `manifests/arc-controller-*/values.yaml` 的默认 repository 是 NJU。未覆盖 repository 的集群直接使用 NJU。此类集群示例：hk001、huabei-003、hb-003-verl。
+- `modelfoundry` 镜像是定制构建，无自动同步链路。原因见历史注记。
+- 决策记录（2026-10-18）：`0.14.201` 为 liqo 适配定制构建。其改动不需要进入 0.15.0+。升级到 0.15.0+ 时使用 NJU 上游镜像；仅升级 0.14.x 补丁版本时需要 modelfoundry 构建。
+
+注意：`sync-images.yml` 的 `sync-helm` job 已被注释（PR opensourceways/ascend-ci-deployment#240）。其目标路径 `base_image/actions/gha-runner-scale-set-controller` 从未生效。2026-10-18 探测结果：cn-southwest-2 与 cn-east-4 两个 region 均不存在该路径。不要使用该路径。
+
+Helm chart 的拉取发生在 ArgoCD 与 CI 侧，不经过集群节点。chart 依赖源有两个：官方 `oci://ghcr.io/actions/actions-runner-controller-charts`（新目录使用）与 NJU `oci://ghcr.nju.edu.cn/actions/actions-runner-controller-charts`（部分旧目录使用）。升级前确认所选源包含目标版本。
+
+### 3.2 0.15.0 行为变化（0.14.x → 0.15.0+ 升级适用）
+
+首次升级到 0.15.0 时，按下表核对。
+
+依据：官方 changelog（release `gha-runner-scale-set-0.15.0`，2026-10-01）、CRD schema 逐字段对比（0.14.2 vs 0.15.0）、gy006 金丝雀验证（opensourceways/ascend-ci-deployment#2030）、arc-karmada-test 运行报告。
+
+| 变化（上游 PR） | 行为 | 需要的操作 |
+| --- | --- | --- |
+| 原地升级取代旧升级策略（#4516，breaking） | Runner spec 变更不再立即重建 Listener 与 EphemeralRunnerSet。顺序变为：关停 Runner Scale Set → 等待空闲 runner 退出 → 滚动更新。忙碌 runner 不被打断 | 无需配置。Controller values 中旧的 `flags.updateStrategy` 会被忽略，删除它 |
+| Runner 计数改走 metrics（#4557/#4583） | AutoscalingRunnerSet 与 EphemeralRunnerSet 的 status 计数字段被移除。kubectl printer columns 被移除 | 看板或告警读取 CR status 计数时，改为读取 controller metrics。`metrics:` 对象的配置方式不变 |
+| Listener 漂移检测改为直接比较 Pod（#4635/#4680/#4695） | Listener Pod 的比较对象从 hash 变为 Pod 本身 | 验收 §4.2 时增加观察：listener 无重建循环（日志无持续 patch） |
+| chart 渲染期校验注解与标签（#4637/#4639/#4640/#4679） | values 中的注解值必须为字符串。裸整数或布尔导致渲染失败 | 升级前核对 Runner Scale Set values 的 annotations。gy006 已核对：全部合规 |
+| controller flag 变更（#4670） | `runnerMaxConcurrentReconciles` 与 `updateStrategy` 被移除。替代物为 per-controller 默认值（2/2/2/4） | 删除包装 chart values 中的这两个 flag。gy006 已删除 |
+| CRD schema | EphemeralRunner、EphemeralRunnerSet、AutoscalingRunnerSet 的 spec 与 status 无字段移除。`ephemeralrunners` 的 `.status.phase` 与 `ephemeralrunnersets` 的 `.spec.ephemeralRunnerSpec` 保持兼容 | zombie-runner-cleanup 与 monitoring cronjob 不受影响。CRD 由 ArgoCD 随 chart 应用（ServerSideApply） |
+
+## 4. 标准流程（四步）
 
 ```
-1. 前置确认  ── 版本 + 集群当前 running 的 listener 基线
-2. 提 PR     ── 修改 Controller（Listener 随动）版本
-3. 等同步    ── ArgoCD 自动 sync
-4. 验收      ── Controller running + 原 listener 全部正常拉起
+1. 前置确认：确认版本。采集 Listener 基线。完成检查清单。
+2. 修改：在配置仓库建分支、改文件、执行本地检查、提 PR。
+3. 同步：PR 合入后，ArgoCD 自动同步。
+4. 验收：逐项核对。全部通过后填写 §7 记录表。
 ```
 
 ### 步骤 1：前置确认
 
 #### 1.1 确认版本
 
-| 项 | 值 |
-| --- | --- |
-| 目标版本 | `<TARGET_VERSION>` |
-| 当前 Controller 版本 | 由集群现状采集（见下） |
+记录下表两个值：
 
-#### 1.2 采集 Listener 基线（升级前，务必存档）
+| 项 | 获取方式 |
+| --- | --- |
+| 目标版本 | 升级计划。填入 `<TARGET_VERSION>` |
+| 当前 Controller 版本 | 执行下方命令，记录输出 |
 
 ```sh
-# Controller 现状
 kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get deploy <release>-gha-rs-controller \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+```
 
-# Listener 基线：名称、状态、镜像
+#### 1.2 采集 Listener 基线
+
+执行下列命令。将输出保存到文件 `baseline-<CLUSTER>-<YYYYMMDD>.txt`。此文件是验收 §4.2 的对照输入。
+
+```sh
+# Listener 清单
 kubectl --kubeconfig=<KUBECONFIG> get autoscalinglisteners -A \
   -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name
+
+# Listener Pod：名称、就绪状态、镜像
 kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
   -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,IMAGE:.spec.containers[0].image \
   | grep -- '-listener'
 ```
 
-将 Listener 名称清单存档，作为步骤 4 的对照基线。
+检查基线输出。发现以下情况时，先处理再升级：
+- 存在无对应 Runner Scale Set 的 Listener（孤儿）。记录它，验收时排除。
+- 存在 READY=false 的 Listener Pod。记录原因。
 
 #### 1.3 前置检查清单
 
-- [ ] 目标镜像 `<TARGET_VERSION>` 已同步到所用镜像仓库，且支持集群所需架构（amd64 / aarch64）
-  - Controller / Listener（标准路径）：`docker manifest inspect ghcr.nju.edu.cn/actions/gha-runner-scale-set-controller:<tag>` 确认 NJU 已同步目标 tag（匿名可查，见 3.1）
-  - Controller / Listener（例外：钉在 `modelfoundry` 定制镜像的集群）：`0.14.201` 为 liqo 适配定制、改动无需带入 0.15.0+（已确认）；升级到 0.15.0+ 直接切 NJU 上游镜像（见 3.1）
-  - Runner 基础镜像：确认 `sync-images.yml` 的 matrix 已包含目标版本，且 SWR 已出现对应 tag（见 3.1）
-- [ ] 若涉及 chart 版本变更：目标 chart 在所选依赖源（官方 ghcr.io / NJU 镜像）上已可得（见 3.1）
-- [ ] 目标 chart / manifest 已存在于配置仓库
-- [ ] 已确认 CRD 从当前版本到目标版本无破坏性变更
-- [ ] 已确认升级附带的 RBAC / 其他资源变化（新增权限需评审接受）
-- [ ] 已确认 Runner Scale Set 版本是否需要同步对齐
-- [ ] 首次升级跨越 0.15.0：按 3.2 核对行为变化（清理被移除的 controller flag、核对 values 注解值为字符串、确认无监控读已移除的 status 计数字段）
-- [ ] 目标集群无大批 CI 任务在执行，已通知使用方
-- [ ] 已记录回退点（当前主干 commit）
+逐项执行并勾选。任何一项不通过，停止升级。
 
-### 步骤 2：提 PR
+- [ ] 确认 Controller / Listener 镜像可用：执行 3.1 的 `docker manifest inspect` 命令。输出包含 manifest 即通过。
+- [ ] 确认 Runner 基础镜像可用（仅 runner 镜像变更时）：`sync-images.yml` 的 matrix 包含目标版本，且 SWR 出现对应 tag。
+- [ ] 确认 chart 可得（仅 chart 版本变更时）：所选依赖源包含目标版本。
+- [ ] 确认包装 chart 存在：`ls manifests/arc-controller-<TARGET_VERSION>/Chart.yaml` 输出该文件。
+- [ ] 对比 CRD：对比当前版本与目标版本的 `crds/` 目录。规则：无字段删除即通过。有字段删除时，评审后决定。
+- [ ] 核对 RBAC：对比目标版本 chart 生成的 RBAC。新增权限时，写入 PR 描述，等待评审。
+- [ ] 对齐 Runner Scale Set 版本：目标集群全部 Runner Scale Set chart 的依赖版本 = 目标版本。
+- [ ] 核对 0.15.0 行为变化（首次跨越 0.15.0 时）：完成 3.2 的三项操作——删除被移除的 flag；核对 values 注解值全部为字符串；确认无监控读取已移除的 status 计数字段。
+- [ ] 确认集群无运行中作业。原因见 6.5。
+- [ ] 记录回退点：保存配置仓库当前 main 分支的 commit SHA。
 
-在配置仓库（GitOps 仓库）中修改，**不直接操作集群**。
+### 步骤 2：修改（提 PR）
+
+在配置仓库操作。禁止直接操作集群。
 
 #### 2.1 修改 Controller 版本
 
-- 若版本由 chart 路径切换控制：修改对应 Application 的 `spec.source.path` 指向目标版本目录。
-- 若版本由值控制：修改 `image.tag` 或依赖版本。
-- Listener：`listenerTemplate` 未硬编码镜像时无需改动；有硬编码时**优先去钉死**（删除 `listenerTemplate` 中的 image，使其跟随 Controller 镜像），确需保留时对齐目标版本。
+按版本控制方式选择一种：
+- 方式 A（chart 路径控制）：修改 Application 的 `spec.source.path`，指向目标版本目录。
+- 方式 B（镜像 tag 控制）：修改 values 中的 `image.repository` 与 `image.tag`。
 
-示例（chart 路径切换）：
+Listener 镜像固定的 Runner Scale Set：优先删除 `listenerTemplate` 中的 image 声明，使 Listener 跟随 Controller 镜像。必须保留时，将 image 改为目标版本。
+
+示例（方式 A）：
 
 ```yaml
 spec:
@@ -131,9 +183,9 @@ spec:
     path: manifests/arc-controller-<TARGET_VERSION>   # 原为上一版本目录
 ```
 
-#### 2.2 Runner Scale Set 版本对齐（如适用）
+#### 2.2 对齐 Runner Scale Set 版本
 
-对需要对齐的 Runner Scale Set，修改其 `Chart.yaml` 中的依赖版本：
+修改每个 Runner Scale Set 的 `Chart.yaml` 依赖版本：
 
 ```yaml
 dependencies:
@@ -141,20 +193,32 @@ dependencies:
     version: <TARGET_VERSION>
 ```
 
-改动后按仓库约定更新依赖锁文件（若仓库提交 `Chart.lock`）。
+仓库提交 `Chart.lock` 时，重新生成或删除该文件。过期的 `Chart.lock` 会使 Helm dependency build 失败。
 
-#### 2.3 校验与提交
+#### 2.3 校验与合入
 
-- YAML 格式检查（yamllint 等）
-- Application 静态检查：`spec.source.path` 存在、前缀合法、`prune: true`、`metadata.name` 与文件名对应
-- 提 PR → CI 通过 → reviewer 合入主干
+按顺序执行：
+1. 运行 yamllint。零 error 通过。
+2. 运行 Application 静态检查。检查项：`spec.source.path` 存在、`prune: true`、`metadata.name` 与文件名对应。
+3. 提 PR。PR 描述包含：变更范围、依据、回滚方式。
+4. CI 通过，评审通过后合入。
 
 ### 步骤 3：等待同步
 
-- GitOps（如 ArgoCD）在合入后自动同步（通常数分钟）。
-- 确认对应 Application 变为 `Synced / Healthy` 后进入验收。
+1. PR 合入后，ArgoCD 开始自动同步。预期 5 分钟内完成。
+2. 执行：
 
-### 步骤 4：验收（逐项勾选，全部通过才算完成）
+```sh
+kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> rollout status deploy/<release>-gha-rs-controller --timeout=300s
+```
+
+输出包含 `successfully rolled out` = Controller 更新完成。
+
+3. 10 分钟后 Application 未达到 `Synced / Healthy`：检查 ArgoCD 事件与 controller 日志，定位原因。不要重复手动触发 sync。
+
+### 步骤 4：验收
+
+逐项核对。全部通过后填写 §7 记录表。
 
 #### 4.1 Controller
 
@@ -162,14 +226,16 @@ dependencies:
 kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get deploy <release>-gha-rs-controller \
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods | grep <release>-gha-rs-controller
-kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> logs deploy/<release>-gha-rs-controller --tail=200 | grep -iE 'error|panic|reconcile'
+kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> logs deploy/<release>-gha-rs-controller --tail=200 \
+  | grep -iE 'error|panic|forbidden'
 ```
 
-- [ ] Controller Pod `READY 1/1`、无 CrashLoop
-- [ ] Controller 镜像为目标版本 `<TARGET_VERSION>`
-- [ ] Controller 日志无持续 `error` / `panic` / `forbidden`
+判定标准：
+- [ ] Pod 状态 `READY 1/1`，无 CrashLoop。
+- [ ] 镜像输出 = `<TARGET_VERSION>` 对应的镜像。
+- [ ] 日志命令输出为空（无 error / panic / forbidden）。
 
-#### 4.2 Listener（对照 1.2 基线）
+#### 4.2 Listener（对照 §1.2 基线）
 
 ```sh
 kubectl --kubeconfig=<KUBECONFIG> get autoscalinglisteners -A \
@@ -179,39 +245,44 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
   | grep -- '-listener'
 ```
 
-- [ ] 基线中的 Listener 名称、数量全部一致（无缺失、无多余）
-- [ ] 每个 Listener 均 `READY=true` 且 Running
-- [ ] 每个 Listener 镜像为目标版本 `<TARGET_VERSION>`
+判定标准：
+- [ ] Listener 名称与数量 = 基线（已排除的孤儿除外）。
+- [ ] 每个 Listener `READY=true` 且 Running。
+- [ ] 每个 Listener 镜像 = `<TARGET_VERSION>` 对应的镜像。
+- [ ] 首次升级到 0.15.0 时：观察 10 分钟，listener 无重建循环（logs 无持续 patch）。
 
 #### 4.3 功能冒烟
 
-- [ ] 触发一个最小 workflow，runner 成功拉起并完成
+- [ ] 触发一个最小 workflow。预期：runner pod 创建，作业完成。
+- [ ] gy006 集群：执行 `e2e-gy006-a2-runner-smoke.yml`。
 
 #### 4.4 关联资源
 
-- [ ] CRD（`actions.github.com/*`）已更新到目标版本对应版本（或确认无需更新）
-- [ ] 升级附带的新增 RBAC / 资源符合预期
+- [ ] CRD 版本 = 目标版本（仅跨 chart 版本升级时）。核对命令：`kubectl get crd | grep actions.github.com`，对比 CRD 的 creationTimestamp 是否更新。
+- [ ] 新增 RBAC 与 PR 描述一致。
 
 ## 5. 回滚
 
-GitOps 回滚以 revert 为准：
+按顺序执行：
+1. 在配置仓库对升级 commit 执行 `git revert <commit> --no-edit`。
+2. 通过 PR 合入 revert。默认分支禁止直接 push。
+3. ArgoCD 同步后，controller 回到上一版本。预期 5 分钟内完成。
+4. 对回滚结果执行 §4.1 与 §4.2 验收。
 
-```sh
-git revert <本批 commit> --no-edit && git push origin HEAD:main
-```
-
-- 同步回上一版本（通常数分钟）。
-- Controller 单副本 + `updateStrategy: immediate` 时，切换瞬间 Listener 会重建，暂停新 runner 注册。
-- 若手动改过 CRD，需另行评估回退（CRD 变更属高风险，通常不可简单回滚）。
+注意：revert 不回退 CRD。CRD 已升级时，先评估旧版本 controller 与新 CRD 的兼容性，再决定是否手动回退 CRD。
 
 ## 6. 风险与注意事项
 
-1. **版本一致性**：Runner Scale Set 与 Controller 版本应保持一致，混用需评审确认兼容性。
-2. **Listener 硬编码镜像**：若 Runner Scale Set 显式钉死 Listener 镜像，Controller 升级不会带动 Listener，必须一并处理。
-3. **CRD 升级**：Helm / ArgoCD 对 chart `crds/` 的升级行为需实测确认；必要时手动 apply。
-4. **RBAC 新增**：升级可能附带新增集群级权限，需安全评审。
-5. **短中断**：0.14.x 单副本 Controller 升级瞬间暂停新 runner 注册，建议安排低峰；**0.15.0 起为原地升级语义（#4516，见 3.2）**——Runner spec 变更先关停 scale set、等待空闲 runner 退出后再滚动，忙碌 runner 不被打断，低峰要求可放宽，但仍建议避开业务高峰。
-6. 每批升级间隔观察，禁止一次性全量。
+每条按“风险 → 条件 → 对策”描述。
+
+1. **版本不一致**。条件：Runner Scale Set 版本 ≠ Controller 版本。对策：获得评审记录后再升级。
+2. **Listener 镜像固定**。条件：`listenerTemplate` 指定了 image。对策：同一 PR 内删除或修改该 image。否则验收 §4.2 失败。
+3. **CRD 升级**。条件：跨 chart 版本升级。对策：ArgoCD 随 chart 应用 CRD；验收 §4.4 核对。手动修改过 CRD 时，先评估兼容性。
+4. **RBAC 变更**。条件：目标版本附带新增权限。对策：写入 PR 描述，评审通过后升级。
+5. **升级窗口的行为**。
+   - 0.14.x：升级瞬间暂停新 runner 注册。对策：确认集群无运行中作业后升级。
+   - 0.15.0+：原地升级语义（#4516，见 3.2）。空闲 runner 退出后滚动，忙碌 runner 不被打断。对策：避开业务高峰。
+6. **分批**。禁止一次升级全部集群。每批验收通过后进入下一批。
 
 ## 7. 记录表
 
