@@ -299,7 +299,7 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 
 | 集群 | 升级前版本 | 目标版本 | Controller 就绪 | Listener 全起 | 冒烟 | 回滚 | 执行人 | 时间 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gy006 | 0.14.2 / 0.14.201 | 0.15.0 | ✓（NJU 镜像，1/1） | ✓（17/17 全 0.15.0，无重建循环） | ✓（a2-1 29s、a2-2 34s 通过；a2-4/a2-8 集群容量排队，与升级无关） | 未触发 | pkking | 2026-10-19 |
+| gy006 | 0.14.2 / 0.14.201 | 0.15.0 | ✓（NJU 镜像，1/1） | ✓（17/17 全 0.15.0，无重建循环） | ✓（a2-1 29s、a2-2 34s 通过；a2-4/a2-8 因节点 CPU 不足排队，90 分钟超时。与升级无关，容量恢复后可重跑） | 未触发 | pkking | 2026-10-19 |
 
 注（gy006 行）：
 - 金丝雀实施 PR：opensourceways/ascend-ci-deployment#2030（8 commits）。冒烟 run：ascend-gha-runners/test#39248638787。
