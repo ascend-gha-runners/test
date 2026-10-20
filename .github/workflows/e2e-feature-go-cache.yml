@@ -203,36 +203,15 @@ jobs:
         run: |
           set -euo pipefail
           export INTERNAL_PROXY="http://${CACHE_HOST}:8084"
-          # A controlled loopback HTTP 503 avoids firewall-dependent behavior of
-          # unbound ports. This fixture never modifies nginx or a production origin.
-          cat > "$TEST_ROOT/fault-proxy.go" <<'EOF'
-          package main
-          import ("net"; "net/http"; "os")
-          func main() {
-            listener, err := net.Listen("tcp", "127.0.0.1:0")
-            if err != nil { panic(err) }
-            if err = os.WriteFile(os.Args[1], []byte("http://"+listener.Addr().String()), 0600); err != nil { panic(err) }
-            server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-              http.Error(w, "e2e local fault fixture", http.StatusServiceUnavailable)
-            })}
-            if err = server.Serve(listener); err != nil { panic(err) }
-          }
-          EOF
-          GOCACHE="$TEST_ROOT/fault-buildcache" timeout 120 go build -o "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.go"
-          # detach stdin 并在退出时 kill -9：容器 runner 的步骤收尾对持有继承句柄的
-          # 后台进程敏感，wait 会阻塞至步骤超时（gy-006 实测：场景全部通过但步骤
-          # 挂满 7 分钟 timeout-minutes）。
-          "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.url" > "$TEST_ROOT/logs/fault-proxy.log" 2>&1 < /dev/null &
-          fault_pid=$!
-          trap 'kill -9 "$fault_pid" 2>/dev/null || true' EXIT
-          for attempt in $(seq 1 50); do
-            if [ -s "$TEST_ROOT/fault-proxy.url" ]; then break; fi
-            sleep 0.1
-          done
-          test -s "$TEST_ROOT/fault-proxy.url"
-          FAULT_PROXY=$(cat "$TEST_ROOT/fault-proxy.url")
-          test "$(curl --noproxy '*' -sS --max-time 5 -o /dev/null -w '%{http_code}' "$FAULT_PROXY/probe")" = 503
-          # First prove the fault alone cannot download a module (separate cache).
+          # 故障源改用未监听的回环端口（无任何后台进程）。
+          # 前两轮 gy-006 实测：Go fault-proxy 方案的场景内容全部通过
+          # （artifact 证据完整），但容器 runner 对步骤内后台进程的收尾
+          # 挂起至 timeout-minutes（trap kill -9 / wait 移除 / stdin detach
+          # 均无效）。yum 用例的未监听端口同法工作正常。
+          # 客户端语义等价：GOPROXY 对 connection refused 与 503 一律
+          # 视为该级失败，管道分隔符下都会降级到下一级。
+          FAULT_PROXY="http://127.0.0.1:59999"
+          echo "[$(date -u +%H:%M:%S)] fault=$FAULT_PROXY phase=negative"
           mkdir -p "$TEST_ROOT/negative/project"
           cp "$TEST_ROOT/fixture/"* "$TEST_ROOT/negative/project/"
           cd "$TEST_ROOT/negative/project"
@@ -242,14 +221,16 @@ jobs:
           set -e
           test "$rc" -ne 0
           test "$rc" -ne 124
-          grep -F "$FAULT_PROXY" "$TEST_ROOT/logs/negative.log"
-          grep -F '503 Service Unavailable' "$TEST_ROOT/logs/negative.log"
-          # Pipe falls back on ANY error; comma only on 404/410, not 503.
+          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/negative.log"
+          grep -Ei 'connection refused' "$TEST_ROOT/logs/negative.log"
+          # Pipe falls back on ANY error; comma only on 404/410.
           # This is client policy, NOT an injected nginx upstream 5xx test.
+          echo "[$(date -u +%H:%M:%S)] phase=fallback-pipe"
           export GOPROXY="${FAULT_PROXY}|${INTERNAL_PROXY}"
           bash "$TEST_ROOT/run-scenario.sh" fallback
           grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/fallback-download.log"
-          grep -F '503 Service Unavailable' "$TEST_ROOT/logs/fallback-download.log"
+          grep -Ei 'connection refused' "$TEST_ROOT/logs/fallback-download.log"
+          echo "[$(date -u +%H:%M:%S)] STEP-DONE"
 
       - name: Always report pass / fail / not_verified
         if: always()
