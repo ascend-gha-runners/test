@@ -153,12 +153,42 @@ jobs:
 
       - name: 【用户视角场景】Cold module download, pinned sums, compile and run
         id: primary
-        timeout-minutes: 7
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           export INTERNAL_PROXY="$GOPROXY"
           # Single internal URL: no ',direct' or public client-side fallback.
           bash "$TEST_ROOT/run-scenario.sh" primary
+
+          # ---- fallback 场景折叠于此 ----
+          # 独立的 always() 条件步骤会让容器 runner 的完成检测挂起至步骤超时
+          #（gy-006 三轮实测：脚本 STEP-DONE 后 runner 仍等满 7 分钟；fault-proxy
+          # 后台进程、kill -9 trap、stdin detach、无后台进程+always() 均复现）。
+          # primary 步骤的完成检测正常，故折叠到此处执行。
+          # 故障源 = 未监听回环端口（无后台进程；GOPROXY 对 connection refused
+          # 与 503 语义等价，管道分隔符下均降级）。
+          FAULT_PROXY="http://127.0.0.1:59999"
+          echo "[$(date -u +%H:%M:%S)] phase=negative"
+          mkdir -p "$TEST_ROOT/negative/project"
+          cp "$TEST_ROOT/fixture/"* "$TEST_ROOT/negative/project/"
+          set +e
+          ( cd "$TEST_ROOT/negative/project" && \
+            GOPROXY="$FAULT_PROXY" GOPATH="$TEST_ROOT/negative/gopath" \
+            GOMODCACHE="$TEST_ROOT/negative/modcache" \
+            timeout 20 go mod download -x rsc.io/quote \
+            > "$TEST_ROOT/logs/negative.log" 2>&1 )
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$rc" -ne 124
+          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/negative.log"
+          grep -Ei 'connection refused' "$TEST_ROOT/logs/negative.log"
+          echo "[$(date -u +%H:%M:%S)] phase=fallback-pipe"
+          export GOPROXY="${FAULT_PROXY}|${INTERNAL_PROXY}"
+          bash "$TEST_ROOT/run-scenario.sh" fallback
+          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/fallback-download.log"
+          grep -Ei 'connection refused' "$TEST_ROOT/logs/fallback-download.log"
+          echo "[$(date -u +%H:%M:%S)] FALLBACK-DONE"
 
       - name: 【基础功能】Successful module response cache headers and warm request
         id: headers
@@ -196,49 +226,13 @@ jobs:
           # Current gocache.conf has no X-Cache-Tier and X-Go-Cache lacks always.
           # A 404 alone cannot establish which nginx upstream fallback ran.
 
-      - name: 【用户视角场景】Go client fallback from invalid local proxy, fresh caches
-        id: fallback
-        if: ${{ always() && steps.setup.outcome == 'success' }}
-        timeout-minutes: 7
-        run: |
-          set -euo pipefail
-          export INTERNAL_PROXY="http://${CACHE_HOST}:8084"
-          # 故障源改用未监听的回环端口（无任何后台进程）。
-          # 前两轮 gy-006 实测：Go fault-proxy 方案的场景内容全部通过
-          # （artifact 证据完整），但容器 runner 对步骤内后台进程的收尾
-          # 挂起至 timeout-minutes（trap kill -9 / wait 移除 / stdin detach
-          # 均无效）。yum 用例的未监听端口同法工作正常。
-          # 客户端语义等价：GOPROXY 对 connection refused 与 503 一律
-          # 视为该级失败，管道分隔符下都会降级到下一级。
-          FAULT_PROXY="http://127.0.0.1:59999"
-          echo "[$(date -u +%H:%M:%S)] fault=$FAULT_PROXY phase=negative"
-          mkdir -p "$TEST_ROOT/negative/project"
-          cp "$TEST_ROOT/fixture/"* "$TEST_ROOT/negative/project/"
-          cd "$TEST_ROOT/negative/project"
-          set +e
-          GOPROXY="$FAULT_PROXY" GOPATH="$TEST_ROOT/negative/gopath" GOMODCACHE="$TEST_ROOT/negative/modcache" timeout 20 go mod download -x rsc.io/quote > "$TEST_ROOT/logs/negative.log" 2>&1
-          rc=$?
-          set -e
-          test "$rc" -ne 0
-          test "$rc" -ne 124
-          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/negative.log"
-          grep -Ei 'connection refused' "$TEST_ROOT/logs/negative.log"
-          # Pipe falls back on ANY error; comma only on 404/410.
-          # This is client policy, NOT an injected nginx upstream 5xx test.
-          echo "[$(date -u +%H:%M:%S)] phase=fallback-pipe"
-          export GOPROXY="${FAULT_PROXY}|${INTERNAL_PROXY}"
-          bash "$TEST_ROOT/run-scenario.sh" fallback
-          grep -F "$FAULT_PROXY/rsc.io/quote/" "$TEST_ROOT/logs/fallback-download.log"
-          grep -Ei 'connection refused' "$TEST_ROOT/logs/fallback-download.log"
-          echo "[$(date -u +%H:%M:%S)] STEP-DONE"
-
       - name: Always report pass / fail / not_verified
         if: always()
         env:
           SETUP: ${{ steps.setup.outcome }}
           PRIMARY: ${{ steps.primary.outcome }}
           HEADERS: ${{ steps.headers.outcome }}
-          FALLBACK: ${{ steps.fallback.outcome }}
+          FALLBACK: ${{ steps.primary.outcome }}
         run: |
           set -euo pipefail
           status() { case "$1" in success) echo pass;; failure) echo fail;; *) echo not_verified;; esac; }
@@ -251,7 +245,7 @@ jobs:
             echo "| HTTP 200 + X-Go-Cache | $(status "$HEADERS") |"
             echo "| Warm HIT (soft) | $(cat "${TEST_ROOT:-/nonexistent}/logs/cache-hit.status" 2>/dev/null || echo not_verified) |"
             echo "| Missing-module 404 (information only) | $(cat "${TEST_ROOT:-/nonexistent}/logs/missing.status" 2>/dev/null || echo not_verified) |"
-            echo "| Go client invalid-local-proxy fallback (isolated) | $(status "$FALLBACK") |"
+            echo "| Go client invalid-local-proxy fallback (folded into primary) | $(status "$FALLBACK") |"
             echo '| Nginx upstream tier/5xx failover | not_verified |'
             echo '| Sumdb network/authentication service | not_verified |'
             echo
