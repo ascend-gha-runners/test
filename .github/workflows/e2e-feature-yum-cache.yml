@@ -242,11 +242,16 @@ jobs:
           find "$testdir/cache" -type f -name repomd.xml -size +0c | grep -q .
           # This sole repo has only the loopback fault and the internal mirror;
           # a fresh cachedir plus downloaded RPM proves the valid source supplied bytes.
+          # timeout=2 是速度停滞超时(minrate 1KB/s×2s)：makecache 元数据小包适用；
+          # 下载阶段放大到 60s，且用依赖树小的 zstd（git 会拉整个 perl 栈，
+          # 每个包先撞死地址，慢速包被 timeout=2 误杀——本地 22.03 容器复现）。
           action=install
-          if rpm -q git >/dev/null 2>&1; then action=reinstall; fi
-          dnf "$@" "$action" -y --downloadonly git > "$testdir/download.log" 2>&1
+          if rpm -q zstd >/dev/null 2>&1; then action=reinstall; fi
+          if ! dnf "$@" --setopt=timeout=60 "$action" -y --downloadonly zstd > "$testdir/download.log" 2>&1; then
+            cat "$testdir/download.log"; exit 1
+          fi
           cat "$testdir/download.log"
-          find "$testdir/cache" -type f -name 'git-[0-9]*.rpm' -size +0c | grep -q .
+          find "$testdir/cache" -type f -name 'zstd-[0-9]*.rpm' -size +0c | grep -q .
           echo "✓ YUM/DNF 客户端容灾：有效元数据与内网 RPM 下载均已验证"
 
       - name: 硬断言结果汇总（客户端备用源不代表 nginx 上游切换）
