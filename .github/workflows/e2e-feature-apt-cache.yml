@@ -147,15 +147,15 @@ jobs:
           for source in /etc/apt/sources.list.d/*.list; do
             if [ -f "$source" ]; then set -- "$@" "$source"; fi
           done
-          grep -hE '^deb .*' "$@" | grep -F "http://${CACHE_HOST}:8081" > /tmp/apt-primary.sources
-          test -s /tmp/apt-primary.sources
+          grep -hE '^deb .*' "$@" | grep -F "http://${CACHE_HOST}:8081" > /tmp/apt-primary.list
+          test -s /tmp/apt-primary.list
 
       - name: 【用户视角场景】3. 经内网缓存真实执行 apt-get update
         id: primary-index
         run: |
           echo "=== 执行 apt-get update -y ==="
           rm -rf /var/lib/apt/lists/*
-          apt-get -o Dir::Etc::sourcelist=/tmp/apt-primary.sources -o Dir::Etc::sourceparts=/tmp/apt-primary-empty -o APT::Update::Error-Mode=any update -y
+          apt-get -o Dir::Etc::sourcelist=/tmp/apt-primary.list -o Dir::Etc::sourceparts=/tmp/apt-primary-empty -o APT::Update::Error-Mode=any update -y
 
       - name: 【用户视角场景】4. 经内网缓存真实安装核心编译工具链（vLLM-Ascend 依赖）
         id: primary-download
@@ -163,7 +163,7 @@ jobs:
           echo "=== 安装构建依赖 (git, zstd, gcc, cmake) ==="
           set -eu
           apt-get clean
-          apt-get -o Dir::Etc::sourcelist=/tmp/apt-primary.sources -o Dir::Etc::sourceparts=/tmp/apt-primary-empty install -y --reinstall --no-install-recommends git zstd gcc cmake > /tmp/apt-install.log 2>&1
+          apt-get -o Dir::Etc::sourcelist=/tmp/apt-primary.list -o Dir::Etc::sourceparts=/tmp/apt-primary-empty install -y --reinstall --no-install-recommends git zstd gcc cmake > /tmp/apt-install.log 2>&1
           cat /tmp/apt-install.log
           grep -F "http://${CACHE_HOST}:8081" /tmp/apt-install.log | grep -E '^Get:'
 
@@ -215,7 +215,7 @@ jobs:
           chmod 755 "$testdir"
           mkdir -p "$testdir/lists/partial" "$testdir/archives/partial" "$testdir/empty"
           # Only reviewed internal sources; no pre-existing indexes or package cache.
-          cp /tmp/apt-primary.sources "$testdir/sources.list"
+          cp /tmp/apt-primary.list "$testdir/sources.list"
           test -s "$testdir/sources.list"
           echo 'deb [trusted=yes] http://127.0.0.1:59999/ubuntu jammy main' >> "$testdir/sources.list"
           set -- -o "Dir::Etc::sourcelist=$testdir/sources.list" -o "Dir::Etc::sourceparts=$testdir/empty" -o "Dir::State::lists=$testdir/lists" -o "Dir::Cache::archives=$testdir/archives" -o Acquire::http::Timeout=2 -o Acquire::Retries=1
@@ -248,4 +248,4 @@ jobs:
                   summary.write(f'| {name} | {result} |\n')
               summary.write('Internal-only APT sources; client fallback is not nginx upstream failover evidence.\n')
           PY
-          rm -rf /tmp/apt-primary.sources /tmp/apt-primary-empty
+          rm -rf /tmp/apt-primary.list /tmp/apt-primary-empty

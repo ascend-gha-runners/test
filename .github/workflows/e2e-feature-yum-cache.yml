@@ -136,6 +136,7 @@ jobs:
           echo "=== 替换 /etc/yum.repos.d/*.repo 为 8083 缓存端口 ==="
           sed -i "s|https://repo.openeuler.org|http://${CACHE_HOST}:8083|g" /etc/yum.repos.d/*.repo
           sed -Ei "s@https?://[^/]+/(openeuler|centos|fedora)@http://${CACHE_HOST}:8083/\\1@g" /etc/yum.repos.d/*.repo
+          sed -Ei 's/^(mirrorlist|metalink)=/#\\1=/' /etc/yum.repos.d/*.repo
           echo "=== 检查修改后的 yum 源 ==="
           grep -F "${CACHE_HOST}:8083" /etc/yum.repos.d/*.repo
 
