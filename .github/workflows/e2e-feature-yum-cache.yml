@@ -214,12 +214,18 @@ jobs:
           testdir=$(mktemp -d /tmp/yum-failover.XXXXXX)
           trap 'rm -rf "$testdir"' EXIT
           mkdir -p "$testdir/repos" "$testdir/cache"
+          echo "=== 从容器已重写的源配置推导有效内网 OS baseurl（不硬编码版本路径）==="
+          valid_baseurl=$(grep -h '^baseurl=' /etc/yum.repos.d/*.repo \
+            | grep -F "/OS/\$basearch/" | head -1 | cut -d= -f2-)
+          test -n "$valid_baseurl" || { echo "::error::容器源中未找到内网 OS baseurl"; exit 1; }
+          echo "valid_baseurl=$valid_baseurl"
+
           echo "=== 配置包含故障地址（127.0.0.1:59999）与有效内网地址的双 baseurl repo ==="
           cat > "$testdir/repos/failover-test.repo" <<EOF
           [failover-test]
           name=Failover Test Repo
           baseurl=http://127.0.0.1:59999/openeuler/invalid
-                  http://${CACHE_HOST}:8083/openeuler/openEuler-22.03-LTS/everything/\$basearch/
+                  ${valid_baseurl}
           enabled=1
           gpgcheck=0
           timeout=2
