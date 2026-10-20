@@ -60,7 +60,11 @@ jobs:
     runs-on: ${{ fromJson(needs.select-runner.outputs.runner).labels }}
     timeout-minutes: 20
     container:
-      image: golang:1.23-bookworm
+      # gy006 等集群节点直连 registry-1.docker.io 超时（containerd 不走 squid，
+      # 2026-10-20 实测 dial tcp i/o timeout）；改用 SWR 的 Docker Hub 镜像源。
+      # 注意：该 tag 仅 amd64；本工作流按 runners.json 只选 CPU runner（gy-006
+      # 为 amd64）。aarch64 CPU 集群接入时需换对应架构 tag。
+      image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/golang:1.23-bookworm
     defaults:
       run:
         shell: bash
