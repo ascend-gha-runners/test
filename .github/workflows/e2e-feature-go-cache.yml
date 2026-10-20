@@ -219,9 +219,12 @@ jobs:
           }
           EOF
           GOCACHE="$TEST_ROOT/fault-buildcache" timeout 120 go build -o "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.go"
-          "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.url" > "$TEST_ROOT/logs/fault-proxy.log" 2>&1 &
+          # detach stdin 并在退出时 kill -9：容器 runner 的步骤收尾对持有继承句柄的
+          # 后台进程敏感，wait 会阻塞至步骤超时（gy-006 实测：场景全部通过但步骤
+          # 挂满 7 分钟 timeout-minutes）。
+          "$TEST_ROOT/fault-proxy" "$TEST_ROOT/fault-proxy.url" > "$TEST_ROOT/logs/fault-proxy.log" 2>&1 < /dev/null &
           fault_pid=$!
-          trap 'kill "$fault_pid" 2>/dev/null || true; wait "$fault_pid" 2>/dev/null || true' EXIT
+          trap 'kill -9 "$fault_pid" 2>/dev/null || true' EXIT
           for attempt in $(seq 1 50); do
             if [ -s "$TEST_ROOT/fault-proxy.url" ]; then break; fi
             sleep 0.1
