@@ -286,11 +286,23 @@ kubectl --kubeconfig=<KUBECONFIG> -n <CONTROLLER_NAMESPACE> get pods \
 4. **RBAC 变更**。条件：目标版本附带新增权限。对策：写入 PR 描述，评审通过后升级。
 5. **升级窗口的行为**。
    - 0.14.x：升级瞬间暂停新 runner 注册。对策：确认集群无运行中作业后升级。
-   - 0.15.0+：原地升级语义（#4516，见 3.2）。空闲 runner 退出后滚动，忙碌 runner 不被打断。对策：避开业务高峰。
+   - 0.15.0+：原地升级语义（#4516，见 3.2）。空闲 runner 退出后滚动，忙碌 runner 不被打断。
+   - **0.15.0+ 的过渡机制（gy006 实测，2026-10-19）**：Controller 启动时校验每个 ARS 的版本注解。注解 ≠ build 版本（例：0.14.2 创建的 ARS）→ Controller 删除该 ARS → ArgoCD self-heal 从 git 重建（新 ARS 带新版本注解）→ Listener 重建。gy006 全部 ARS 在 5 分钟内完成此轮换。
+   - **0.15.0+ 升级的前置条件（两条，必须满足）**：
+     1. 目标集群的 ArgoCD Application 开启自动同步 + selfHeal。否则 ARS 被删除后不会重建，runner 全部消失。
+     2. 集群内全部 ARS 在配置仓库内有对应 chart。无 chart 的 ARS 删除后永久消失（实例：gy006 升级时 nv-action 命名空间 2 个 scale set 永久消失）。
+   - **升级前盘点步骤**：列出集群全部 ARS，逐个确认有对应 chart。命令：`kubectl get autoscalingrunnersets -A`，与配置仓库 chart 清单比对。无 chart 的 ARS：补 chart，或确认废弃并接受删除。
+   - 升级后观察：listener 无重建循环（§4.2）；日志无 403 / forbidden。
 6. **分批**。禁止一次升级全部集群。每批验收通过后进入下一批。
 
 ## 7. 记录表
 
 | 集群 | 升级前版本 | 目标版本 | Controller 就绪 | Listener 全起 | 冒烟 | 回滚 | 执行人 | 时间 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | | | |
+| gy006 | 0.14.2 / 0.14.201 | 0.15.0 | ✓（NJU 镜像，1/1） | ✓（17/17 全 0.15.0，无重建循环） | ✓（a2-1 29s、a2-2 34s 通过；a2-4/a2-8 集群容量排队，与升级无关） | 未触发 | pkking | 2026-10-19 |
+
+注（gy006 行）：
+- 金丝雀实施 PR：opensourceways/ascend-ci-deployment#2030（8 commits）。冒烟 run：ascend-gha-runners/test#39248638787。
+- CRD 实测：ArgoCD ServerSideApply 原地更新 0.15.0 CRD（含新增字段 `listenerConfig`、`actionableRevision`）。
+- 过渡行为：全部 ARS 删除-重建一轮（见 §6.5）；linux-amd64-cpu-1 scale set 因删除过期 `Chart.lock` 首次成功部署。
+- 遗留：nv-action 命名空间 2 个 scale set 永久消失（无 chart，待决策重建）；`linux-arm64-npu-2` 删除卡死（backlog#2607）。
