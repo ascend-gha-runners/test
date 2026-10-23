@@ -1,0 +1,33 @@
+name: arc-fedsched e2e (cpu)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: linux-amd64-cpu-1-lab
+    timeout-minutes: 15
+    steps:
+      - name: where am i
+        run: |
+          case "$NODE_NAME" in
+            172.16.0.*)  CLUSTER="test1" ;;
+            172.16.10.*) CLUSTER="test2" ;;
+            179.*|192.168.9.*|10.0.254.*|ecs-k8s-*|ascend*|ai-910b-*) CLUSTER="karc" ;;
+            *)           CLUSTER="unknown" ;;
+          esac
+          echo "::notice::ARC-FEDSCHED CPU RUNNER CLUSTER = ${CLUSTER} (node=${NODE_NAME})"
+          echo "============================================================"
+          echo "  ARC-FEDSCHED CPU CLUSTER : ${CLUSTER}"
+          echo "  node                      : ${NODE_NAME}"
+          echo "  pod                       : ${POD_NAMESPACE}/${ACTIONS_RUNNER_POD_NAME}"
+          echo "============================================================"
+
+      - name: cpu info
+        run: |
+          uname -a
+          nproc
+          grep -m1 "model name" /proc/cpuinfo || true
