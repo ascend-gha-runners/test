@@ -67,7 +67,7 @@ jobs:
           {
             echo "| task | cluster | node | pod | arch | nproc |"
             echo "|---|---|---|---|---|---|"
-            for f in artifacts/cpu-probe-*/cpu-probe-*.txt; do
+            for f in artifacts/cpu-probe-*/probe-*.txt; do
               [ -f "$f" ] || continue
               task=$(grep '^task=' "$f" | cut -d= -f2)
               cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
