@@ -8,8 +8,12 @@ permissions:
 
 jobs:
   probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5]
     runs-on: linux-aarch64-310p-2-lab
-    timeout-minutes: 15
+    timeout-minutes: 30
     container:
       image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-310p-ubuntu22.04-py3.12
     steps:
@@ -22,15 +26,62 @@ jobs:
             *)           CLUSTER="unknown" ;;
           esac
           POD_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-          echo "::notice::ARC-FEDSCHED RUNNER CLUSTER = ${CLUSTER} (node=${NODE_NAME})"
+          echo "::notice::TASK ${{ matrix.task }} -> CLUSTER ${CLUSTER} (node=${NODE_NAME})"
           echo "============================================================"
+          echo "  TASK                        : ${{ matrix.task }}"
           echo "  ARC-FEDSCHED RUNNER CLUSTER : ${CLUSTER}"
           echo "  node                        : ${NODE_NAME}"
           echo "  pod                         : ${POD_NAMESPACE}/${POD_NAME}"
           echo "  pod ip                      : ${POD_IP}"
-          echo "  k8s apiserver               : ${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
           echo "============================================================"
+          {
+            echo "task=${{ matrix.task }}"
+            echo "cluster=${CLUSTER}"
+            echo "node=${NODE_NAME}"
+            echo "pod=${POD_NAME}"
+            echo "pod_ip=${POD_IP}"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-${{ matrix.task }}.txt
 
-      - name: npu info
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
         run: |
-          npu-smi info
+          echo "## ARC-FEDSCHED LAB — 5-task summary"
+          echo
+          echo "| task | cluster | node | pod ip | NPUs |"
+          echo "|---|---|---|---|---|"
+          for f in artifacts/probe-*/probe-*.txt; do
+            [ -f "$f" ] || continue
+            task=$(grep '^task=' "$f" | cut -d= -f2)
+            cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
+            node=$(grep '^node=' "$f" | cut -d= -f2)
+            ip=$(grep '^pod_ip=' "$f" | cut -d= -f2)
+            npus=$(grep -oE '\| [0-9]+ +310P3' "$f" | awk '{print $2}' | paste -sd, -)
+            echo "| $task | $cluster | $node | $ip | $npus |"
+          done
+          echo
+          echo "### Full npu-smi outputs"
+          for f in artifacts/probe-*/probe-*.txt; do
+            [ -f "$f" ] || continue
+            echo "#### $(basename "$f")"
+            cat "$f"
+            echo
+          done
