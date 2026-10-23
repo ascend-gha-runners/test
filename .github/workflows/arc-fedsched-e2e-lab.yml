@@ -18,3 +18,22 @@ jobs:
           uname -a
           nproc
           echo "arc-fedsched lab ok"
+
+      - name: npu info
+        run: |
+          set +e
+          echo "=== command -v npu-smi ==="
+          command -v npu-smi
+          echo "=== npu-smi info ==="
+          npu-smi info
+          echo "npu-smi exit=$?"
+          echo "=== npu-smi info -t board -i 0 ==="
+          npu-smi info -t board -i 0
+          echo "board exit=$?"
+          echo "=== davinci devices ==="
+          ls -l /dev/davinci* /dev/davinci_manager /dev/hisi_hdc 2>&1
+          echo "=== Ascend driver version ==="
+          cat /usr/local/Ascend/driver/version.info 2>&1
+          echo "=== CANN version ==="
+          cat /usr/local/Ascend/ascend-toolkit/latest/version.cfg 2>&1
+          echo "npu probe done"
