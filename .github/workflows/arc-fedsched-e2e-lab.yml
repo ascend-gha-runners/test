@@ -10,8 +10,6 @@ jobs:
   probe:
     runs-on: linux-aarch64-310p-2-lab
     timeout-minutes: 15
-    container:
-      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-310p-ubuntu22.04-py3.12
     steps:
       - name: hello
         run: |
