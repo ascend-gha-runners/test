@@ -8,6 +8,10 @@ permissions:
 
 jobs:
   probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5]
     runs-on: linux-arm64-cpu-1-lab
     timeout-minutes: 15
     steps:
@@ -19,15 +23,58 @@ jobs:
             179.*|192.168.9.*|10.0.254.*|ecs-k8s-*|ascend*|ai-910b-*) CLUSTER="karc" ;;
             *)           CLUSTER="unknown" ;;
           esac
-          echo "::notice::ARC-FEDSCHED CPU RUNNER CLUSTER = ${CLUSTER} (node=${NODE_NAME})"
+          POD="${POD_NAMESPACE}/${ACTIONS_RUNNER_POD_NAME}"
+          ARCH=$(uname -m)
+          NPROC=$(nproc)
+          echo "::notice::TASK ${{ matrix.task }} -> CPU CLUSTER ${CLUSTER} (node=${NODE_NAME})"
           echo "============================================================"
+          echo "  TASK                     : ${{ matrix.task }}"
           echo "  ARC-FEDSCHED CPU CLUSTER : ${CLUSTER}"
-          echo "  node                      : ${NODE_NAME}"
-          echo "  pod                       : ${POD_NAMESPACE}/${ACTIONS_RUNNER_POD_NAME}"
+          echo "  node                     : ${NODE_NAME}"
+          echo "  pod                      : ${POD}"
+          echo "  arch                     : ${ARCH}"
+          echo "  nproc                    : ${NPROC}"
           echo "============================================================"
+          {
+            echo "task=${{ matrix.task }}"
+            echo "cluster=${CLUSTER}"
+            echo "node=${NODE_NAME}"
+            echo "pod=${POD}"
+            echo "arch=${ARCH}"
+            echo "nproc=${NPROC}"
+          } | tee /tmp/probe-${{ matrix.task }}.txt
 
-      - name: cpu info
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
         run: |
-          uname -a
-          nproc
-          grep -m1 "model name" /proc/cpuinfo || true
+          {
+            echo "| task | cluster | node | pod | arch | nproc |"
+            echo "|---|---|---|---|---|---|"
+            for f in artifacts/cpu-probe-*/cpu-probe-*.txt; do
+              [ -f "$f" ] || continue
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
+              node=$(grep '^node=' "$f" | cut -d= -f2)
+              pod=$(grep '^pod=' "$f" | cut -d= -f2)
+              arch=$(grep '^arch=' "$f" | cut -d= -f2)
+              nproc=$(grep '^nproc=' "$f" | cut -d= -f2)
+              echo "| $task | $cluster | $node | $pod | $arch | $nproc |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
