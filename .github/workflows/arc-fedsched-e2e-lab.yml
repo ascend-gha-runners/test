@@ -64,24 +64,24 @@ jobs:
 
       - name: summary
         run: |
-          echo "## ARC-FEDSCHED LAB — 5-task summary"
-          echo
-          echo "| task | cluster | node | pod ip | NPUs |"
-          echo "|---|---|---|---|---|"
-          for f in artifacts/probe-*/probe-*.txt; do
-            [ -f "$f" ] || continue
-            task=$(grep '^task=' "$f" | cut -d= -f2)
-            cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
-            node=$(grep '^node=' "$f" | cut -d= -f2)
-            ip=$(grep '^pod_ip=' "$f" | cut -d= -f2)
-            npus=$(grep -oE '\| [0-9]+ +310P3' "$f" | awk '{print $2}' | sort -un | paste -sd, -)
-            echo "| $task | $cluster | $node | $ip | $npus |"
-          done
-          echo
-          echo "### Full npu-smi outputs"
-          for f in artifacts/probe-*/probe-*.txt; do
-            [ -f "$f" ] || continue
-            echo "#### $(basename "$f")"
-            cat "$f"
+          {
+            echo "| task | cluster | node | pod ip | NPUs |"
+            echo "|---|---|---|---|---|"
+            for f in artifacts/probe-*/probe-*.txt; do
+              [ -f "$f" ] || continue
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
+              node=$(grep '^node=' "$f" | cut -d= -f2)
+              ip=$(grep '^pod_ip=' "$f" | cut -d= -f2)
+              npus=$(grep -oE '\| [0-9]+ +310P3' "$f" | awk '{print $2}' | sort -un | paste -sd, -)
+              echo "| $task | $cluster | $node | $ip | $npus |"
+            done
             echo
-          done
+            echo "### Full npu-smi outputs"
+            for f in artifacts/probe-*/probe-*.txt; do
+              [ -f "$f" ] || continue
+              echo "#### $(basename "$f")"
+              cat "$f"
+              echo
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
