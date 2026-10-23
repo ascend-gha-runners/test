@@ -13,6 +13,14 @@ jobs:
     container:
       image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-310p-ubuntu22.04-py3.12
     steps:
+      - name: where am i
+        run: |
+          echo "runner=$RUNNER_NAME"
+          echo "job_pod=$POD_NAME namespace=$POD_NAMESPACE node=$NODE_NAME"
+          echo "k8s_service_host=$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT"
+          echo "pod_ips=$(hostname -I 2>/dev/null || true)"
+          echo "hostname=$(hostname)"
+
       - name: hello
         run: |
           echo "runner=$RUNNER_NAME"
@@ -29,8 +37,8 @@ jobs:
           echo "=== npu-smi info ==="
           npu-smi info
           echo "npu-smi exit=$?"
-          echo "=== npu-smi info -t board -i 0 ==="
-          npu-smi info -t board -i 0
+          echo "=== npu-smi info -t board ==="
+          npu-smi info -t board
           echo "board exit=$?"
           echo "=== davinci devices ==="
           ls -l /dev/davinci* /dev/davinci_manager /dev/hisi_hdc 2>&1
