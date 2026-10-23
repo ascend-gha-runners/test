@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   probe:
-    runs-on: linux-amd64-cpu-1-lab
+    runs-on: linux-arm64-cpu-1-lab
     timeout-minutes: 15
     steps:
       - name: where am i
