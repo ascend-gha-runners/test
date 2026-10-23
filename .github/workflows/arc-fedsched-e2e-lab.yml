@@ -74,7 +74,7 @@ jobs:
             cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
             node=$(grep '^node=' "$f" | cut -d= -f2)
             ip=$(grep '^pod_ip=' "$f" | cut -d= -f2)
-            npus=$(grep -oE '\| [0-9]+ +310P3' "$f" | awk '{print $2}' | paste -sd, -)
+            npus=$(grep -oE '\| [0-9]+ +310P3' "$f" | awk '{print $2}' | sort -un | paste -sd, -)
             echo "| $task | $cluster | $node | $ip | $npus |"
           done
           echo
