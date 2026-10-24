@@ -1,19 +1,13 @@
-name: arc-fedsched label routing (karmada-test)
+name: arc-fedsched label routing (karmada-test + unique labels)
 
 on:
   workflow_dispatch:
-    inputs:
-      jobs:
-        description: "number of probe jobs"
-        required: false
-        default: "10"
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  shared:
     strategy:
       fail-fast: false
       matrix:
@@ -33,16 +27,9 @@ jobs:
             *)           CLUSTER="unknown" ;;
           esac
           POD_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-          echo "::notice::TASK ${{ matrix.task }} -> CLUSTER ${CLUSTER} (node=${NODE_NAME})"
-          echo "============================================================"
-          echo "  TASK         : ${{ matrix.task }}"
-          echo "  CLUSTER      : ${CLUSTER}"
-          echo "  node         : ${NODE_NAME}"
-          echo "  pod          : ${POD_NAMESPACE}/${POD_NAME}"
-          echo "  pod ip       : ${POD_IP}"
-          echo "  runner name  : ${{ runner.name }}"
-          echo "============================================================"
+          echo "::notice::shared task ${{ matrix.task }} -> ${CLUSTER} (node=${NODE_NAME})"
           {
+            echo "scenario=shared"
             echo "task=${{ matrix.task }}"
             echo "cluster=${CLUSTER}"
             echo "node=${NODE_NAME}"
@@ -51,43 +38,119 @@ jobs:
             echo "runner=${RUNNER_NAME}"
             echo "--- npu-smi info ---"
             npu-smi info
-          } | tee /tmp/probe-${{ matrix.task }}.txt
-
-      - name: upload probe result
-        uses: actions/upload-artifact@v4
+          } | tee /tmp/probe-shared-${{ matrix.task }}.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: probe-${{ matrix.task }}
-          path: /tmp/probe-${{ matrix.task }}.txt
+          name: probe-shared-${{ matrix.task }}
+          path: /tmp/probe-shared-${{ matrix.task }}.txt
+          retention-days: 1
+
+  test03:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: linux-aarch64-1980-2-argocd
+    timeout-minutes: 60
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-910b-ubuntu22.04-py3.12
+    steps:
+      - name: where am i
+        run: |
+          case "$NODE_NAME" in
+            172.22.6.*)  CLUSTER="gy006" ;;
+            179.*|192.168.9.*|10.0.254.*|ecs-k8s-*|ascend*|ai-910b-*) CLUSTER="karc" ;;
+            172.16.0.*)  CLUSTER="test1" ;;
+            172.16.10.*) CLUSTER="test2" ;;
+            *)           CLUSTER="unknown" ;;
+          esac
+          POD_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          echo "::notice::test03 task ${{ matrix.task }} -> ${CLUSTER} (node=${NODE_NAME})"
+          {
+            echo "scenario=test03"
+            echo "task=${{ matrix.task }}"
+            echo "cluster=${CLUSTER}"
+            echo "node=${NODE_NAME}"
+            echo "pod=${POD_NAME}"
+            echo "pod_ip=${POD_IP}"
+            echo "runner=${RUNNER_NAME}"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-test03-${{ matrix.task }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-test03-${{ matrix.task }}
+          path: /tmp/probe-test03-${{ matrix.task }}.txt
+          retention-days: 1
+
+  gy006:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    runs-on: linux-aarch64-1980-1-gy006
+    timeout-minutes: 60
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-910b-ubuntu22.04-py3.12
+    steps:
+      - name: where am i
+        run: |
+          case "$NODE_NAME" in
+            172.22.6.*)  CLUSTER="gy006" ;;
+            179.*|192.168.9.*|10.0.254.*|ecs-k8s-*|ascend*|ai-910b-*) CLUSTER="karc" ;;
+            172.16.0.*)  CLUSTER="test1" ;;
+            172.16.10.*) CLUSTER="test2" ;;
+            *)           CLUSTER="unknown" ;;
+          esac
+          POD_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+          echo "::notice::gy006 task ${{ matrix.task }} -> ${CLUSTER} (node=${NODE_NAME})"
+          {
+            echo "scenario=gy006"
+            echo "task=${{ matrix.task }}"
+            echo "cluster=${CLUSTER}"
+            echo "node=${NODE_NAME}"
+            echo "pod=${POD_NAME}"
+            echo "pod_ip=${POD_IP}"
+            echo "runner=${RUNNER_NAME}"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-gy006-${{ matrix.task }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-gy006-${{ matrix.task }}
+          path: /tmp/probe-gy006-${{ matrix.task }}.txt
           retention-days: 1
 
   summary:
-    needs: [probe]
+    needs: [shared, test03, gy006]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
       - name: summary
         run: |
           {
-            echo "## arc-fedsched label routing (karmada-test)"
+            echo "## arc-fedsched label routing"
             echo
-            echo "| task | cluster | node | runner | NPUs |"
-            echo "|---|---|---|---|---|"
-            for f in artifacts/probe-*/probe-*.txt; do
-              [ -f "$f" ] || continue
-              task=$(grep '^task=' "$f" | cut -d= -f2)
-              cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
-              node=$(grep '^node=' "$f" | cut -d= -f2)
-              runner=$(grep '^runner=' "$f" | cut -d= -f2)
-              npus=$(grep -oE '\| [0-9]+ +910B[0-9]*' "$f" | awk '{print $2}' | sort -un | paste -sd, -)
-              echo "| $task | $cluster | $node | $runner | $npus |"
+            for s in shared test03 gy006; do
+              echo "### ${s}"
+              echo
+              echo "| task | cluster | node | runner | NPUs |"
+              echo "|---|---|---|---|---|"
+              for f in artifacts/probe-${s}-*/probe-${s}-*.txt; do
+                [ -f "$f" ] || continue
+                task=$(grep '^task=' "$f" | cut -d= -f2)
+                cluster=$(grep '^cluster=' "$f" | cut -d= -f2)
+                node=$(grep '^node=' "$f" | cut -d= -f2)
+                runner=$(grep '^runner=' "$f" | cut -d= -f2)
+                npus=$(grep -oE '\| [0-9]+ +910B[0-9]*' "$f" | awk '{print $2}' | sort -un | paste -sd, -)
+                echo "| $task | $cluster | $node | $runner | $npus |"
+              done
+              echo
             done
-            echo
             echo "### Full npu-smi outputs"
             echo '```'
             for f in artifacts/probe-*/probe-*.txt; do
