@@ -1,0 +1,17 @@
+name: smoke-a5-recovery
+on: workflow_dispatch
+jobs:
+  smoke:
+    runs-on: linux-aarch64-a5-2-sh001
+    timeout-minutes: 15
+    steps:
+      - name: node basics
+        run: uname -m; hostname; date -u
+      - name: NPU visible
+        run: npu-smi info 2>/dev/null | head -10 || echo "npu-smi unavailable in this runner image"
+      - name: clone via git cache chain
+        run: |
+          git config --global --get-regexp 'url\.' || true
+          timeout 150 git clone --depth=1 https://github.com/ClickHouse/ClickHouse.git /tmp/smokeclone && ls /tmp/smokeclone | head -3
+      - name: done
+        run: echo A5-SMOKE-OK $(date -u)
