@@ -114,6 +114,7 @@ jobs:
           else
             note "2c 经成员 pypi 源装出 torch+torch_npu" stack fail "成功" "$(tail -3 /tmp/e2e/pip.log | tr '\n' ' ' | cut -c1-170)"
           fi
+          column -t -s $'\t' /tmp/e2e/res.tsv >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: 3. 业务栈 import（torch / torch_npu / vllm）
         continue-on-error: true
@@ -150,6 +151,7 @@ jobs:
             note "3 torch/torch_npu/vllm import" stack ok "至少 torch+torch_npu" "$stack"
           fi
           [ "$(cat /tmp/e2e/npucnt 2>/dev/null)" = "1" ] && note "3b torch 能枚举 NPU" stack ok "true" "device_count 可读" || note "3b torch 能枚举 NPU" stack fail "true" "torch.npu.is_available 为假"
+          column -t -s $'\t' /tmp/e2e/res.tsv >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: 4. 小推理（真跑一次 matmul on NPU）
         continue-on-error: true
@@ -162,7 +164,8 @@ jobs:
           b = torch.randn(512, 512, device="npu")
           print("matmul ok, mean=", (a @ b).float().mean().item())
           PY
-          if [ $rc -eq 0 ]; then note "4 NPU matmul 实跑" stack hard ok "成功" "$(tail -1 /tmp/e2e/matmul.log)"; else note "4 NPU matmul 实跑" stack fail "成功" "$(tail -2 /tmp/e2e/matmul.log | tr '\n' ' ')"; fi
+          if [ $rc -eq 0 ]; then note "4 NPU matmul 实跑" stack ok "成功" "$(tail -1 /tmp/e2e/matmul.log)"; else note "4 NPU matmul 实跑" stack fail "成功" "$(tail -2 /tmp/e2e/matmul.log | tr '\n' ' ')"; fi
+          column -t -s $'\t' /tmp/e2e/res.tsv >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: 5. 代码拉取三条路（直连 / 经 git-cdn / insteadOf 是否已配）
         continue-on-error: true
