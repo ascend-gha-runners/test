@@ -17,6 +17,10 @@ on:
         options:
           - linux-aarch64-310p-2-lab
           - linux-aarch64-310p-2-argocd
+      install_stack:
+        description: '镜像未自带 torch 时，是否用成员内 pypi 源装 torch+torch_npu 以实测业务栈'
+        default: true
+        type: boolean
       image:
         description: '业务容器镜像（模仿 vllm-ascend CI）'
         default: 'quay.io/ascend/vllm-ascend:nightly-releases-v0.30.0-310p'
@@ -84,6 +88,32 @@ jobs:
           for p in /usr/local/Ascend/ascend-toolkit /usr/local/Ascend/nnal/atb; do
             [ -d "$p" ] && note "2b toolkit $p" soft ok "-" "已就位（多来自镜像或挂载）" || note "2b toolkit $p" soft info "可缺" "不存在"
           done
+
+      - name: 2c. 镜像没带业务栈时，用成员内 pypi 源装 torch+torch_npu
+        continue-on-error: true
+        if: ${{ inputs.install_stack }}
+        run: |
+          source /tmp/e2e/fn.sh
+          if python3 -c "import torch" >/dev/null 2>&1; then
+            note "2c 业务栈是否需要现装" stack ok "镜像自带则不装" "镜像已有 torch，跳过安装"
+            exit 0
+          fi
+          rc=0
+          echo "  先走成员内 pypi 缓存 svc"
+          timeout 900 pip install --no-cache-dir -q torch torch-npu \
+            -i "$PYPI_CACHE" --trusted-host cache-service.nginx-pypi-cache.svc.cluster.local \
+            > /tmp/e2e/pip.log 2>&1 || rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "  缓存源没成，改华为云直连重试"
+            timeout 900 pip install --no-cache-dir -q torch torch-npu -i "$PYPI_MIRROR" \
+              >> /tmp/e2e/pip.log 2>&1 || rc=$?
+          fi
+          if [ $rc -eq 0 ] && python3 -c "import torch, torch_npu" >/dev/null 2>&1; then
+            v=$(python3 -c "import torch,torch_npu;print(torch.__version__, torch_npu.__version__ if hasattr(torch_npu,'__version__') else 'ok')")
+            note "2c 经成员 pypi 源装出 torch+torch_npu" stack ok "成功" "$v"
+          else
+            note "2c 经成员 pypi 源装出 torch+torch_npu" stack fail "成功" "$(tail -3 /tmp/e2e/pip.log | tr '\n' ' ' | cut -c1-170)"
+          fi
 
       - name: 3. 业务栈 import（torch / torch_npu / vllm）
         continue-on-error: true
