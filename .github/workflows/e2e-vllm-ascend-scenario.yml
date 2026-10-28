@@ -1,0 +1,246 @@
+name: e2e vllm-ascend 业务场景（成员集群能力全量探测）
+
+# 目的：以 vllm-ascend CI 的真实依赖为清单，在 arc-fedsched 联邦的成员集群（test-01/02）
+# 上把「跑一个业务任务需要的所有能力」逐项探测一遍，产出一张 ✅/❌ 表。
+# 只读探测 + 临时目录写入，不碰任何集群配置。
+#
+# 每一项都标注 expected：区分「真缺口」与「按设计就该如此」（例如 huggingface.co 在成员
+# 侧本就不通，走 modelscope 是业务实际形态）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: '跑在哪个 scale set 上'
+        default: 'linux-aarch64-310p-2-lab'
+        type: choice
+        options:
+          - linux-aarch64-310p-2-lab
+          - linux-aarch64-310p-2-argocd
+      image:
+        description: '业务容器镜像（模仿 vllm-ascend CI）'
+        default: 'quay.io/ascend/vllm-ascend:nightly-releases-v0.30.0-310p'
+        type: choice
+        options:
+          - quay.io/ascend/vllm-ascend:nightly-releases-v0.30.0-310p
+          - quay.io/ascend/vllm-ascend:nightly-releases-v0.30.0-a3
+          - swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:9.2.0_20260928212200-310p-ubuntu22.04-py3.12
+
+permissions:
+  contents: read
+
+env:
+  PYPI_MIRROR: https://repo.huaweicloud.com/repository/pypi/simple/
+  PYPI_CACHE: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple/
+  GITCDN: http://git-cdn-service.git-cdn.svc.cluster.local:8000
+  NFS_SHARE_HOST_DIR: /mnt/sfs-local/ascend-ci-share-nv-action-vllm-benchmarks
+
+jobs:
+  scenario:
+    name: 能力探测（${{ inputs.runner_label }}）
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 45
+    container:
+      image: ${{ inputs.image }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 准备结果收集器
+        run: |
+          mkdir -p /tmp/e2e
+          : > /tmp/e2e/res.tsv
+          note() {   # note <id> <hard|soft> <ok|fail|info> <expected> <detail>
+            printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> /tmp/e2e/res.tsv
+            echo "[$3] $1 — $5"
+          }
+          echo 'note() { printf "%s\t%s\t%s\t%s\t%s\n" "$1" "$2" "$3" "$4" "$5" >> /tmp/e2e/res.tsv; echo "[$3] $1 — $5"; }' > /tmp/e2e/fn.sh
+          export -f note 2>/dev/null || true
+
+      - name: 1. 落点与 NPU（硬前置）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          case "${NODE_NAME:-}" in
+            172.16.0.*)  CLUSTER=test1 ;;
+            172.16.10.*) CLUSTER=test2 ;;
+            *)           CLUSTER=unknown ;;
+          esac
+          echo "### 落点：cluster=${CLUSTER} node=${NODE_NAME} pod=${POD_NAMESPACE}/${POD_NAME}"
+          echo "### 镜像：${{ inputs.image }}"
+          n=$(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)
+          if [ "$n" -ge 1 ]; then note "1 NPU 设备可见" hard ok ">=1" "davinci=${n} ASCEND_DEVICE_ID=${ASCEND_DEVICE_ID:-无} NPU_VISIBLE_DEVICES=${NPU_VISIBLE_DEVICES:-无}"; else note "1 NPU 设备可见" hard fail ">=1" "看不到 /dev/davinci*"; fi
+          if command -v npu-smi >/dev/null 2>&1; then note "1b npu-smi 在 PATH" soft ok "-" "版本可查"; npu-smi info | head -12; else note "1b npu-smi 在 PATH" soft info "视镜像" "该镜像未带 npu-smi（driver 挂载见下条）"; fi
+
+      - name: 2. driver 挂载与 toolkit（硬前置）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          if [ -d /usr/local/Ascend/driver/tools ] && [ -n "$(ls -A /usr/local/Ascend/driver/tools 2>/dev/null)" ]; then
+            note "2 driver/tools hostPath" hard ok "存在且非空" "$(ls /usr/local/Ascend/driver/tools | head -3 | tr '\n' ' ')"
+          else
+            note "2 driver/tools hostPath" hard fail "存在且非空" "/usr/local/Ascend/driver/tools 缺失或为空"
+          fi
+          for p in /usr/local/Ascend/ascend-toolkit /usr/local/Ascend/nnal/atb; do
+            [ -d "$p" ] && note "2b toolkit $p" soft ok "-" "已就位（多来自镜像或挂载）" || note "2b toolkit $p" soft info "可缺" "不存在"
+          done
+
+      - name: 3. 业务栈 import（torch / torch_npu / vllm）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          python3 - <<'PY' || true
+          import json, subprocess, sys
+          res = {}
+          for m in ("torch", "torch_npu", "vllm", "vllm_ascend"):
+              try:
+                  mod = __import__(m)
+                  res[m] = getattr(mod, "__version__", "ok")
+              except Exception as e:
+                  res[m] = f"FAIL:{type(e).__name__}:{str(e)[:60]}"
+          print(json.dumps(res, ensure_ascii=False))
+          try:
+              import torch, torch_npu
+              ok = torch.npu.is_available()
+              cnt = torch.npu.device_count()
+              print(f"torch.npu.is_available={ok} device_count={cnt}")
+          except Exception as e:
+              ok, cnt = False, 0
+          with open("/tmp/e2e/stack.txt", "w") as f:
+              f.write(json.dumps(res))
+          with open("/tmp/e2e/npucnt", "w") as f:
+              f.write("1" if ok else "0")
+          PY
+          source /tmp/e2e/fn.sh
+          stack=$(cat /tmp/e2e/stack.txt 2>/dev/null || echo '{}')
+          echo "$stack" > "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          if [[ "$stack" == *"\"torch\": \"FAIL"* ]]; then
+            note "3 torch/torch_npu/vllm import" hard fail "全部可 import" "$stack"
+          else
+            note "3 torch/torch_npu/vllm import" hard ok "至少 torch+torch_npu" "$stack"
+          fi
+          [ "$(cat /tmp/e2e/npucnt 2>/dev/null)" = "1" ] && note "3b torch 能枚举 NPU" hard ok "true" "device_count 可读" || note "3b torch 能枚举 NPU" hard fail "true" "torch.npu.is_available 为假"
+
+      - name: 4. 小推理（真跑一次 matmul on NPU）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          python3 - > /tmp/e2e/matmul.log 2>&1 <<'PY'
+          import torch, torch_npu
+          a = torch.randn(512, 512, device="npu")
+          b = torch.randn(512, 512, device="npu")
+          print("matmul ok, mean=", (a @ b).float().mean().item())
+          PY
+          rc=$?
+          if [ $rc -eq 0 ]; then note "4 NPU matmul 实跑" hard ok "成功" "$(tail -1 /tmp/e2e/matmul.log)"; else note "4 NPU matmul 实跑" hard fail "成功" "$(tail -2 /tmp/e2e/matmul.log | tr '\n' ' ')"; fi
+
+      - name: 5. 代码拉取三条路（直连 / 经 git-cdn / insteadOf 是否已配）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          command -v git >/dev/null || { note "5 git 可用" hard fail "有 git" "镜像无 git，后续 clone 探测跳过"; exit 0; }
+          rm -rf /tmp/c1 /tmp/c2
+          t0=$(date +%s); timeout 120 git clone -q --depth 1 https://github.com/vllm-project/vllm-ascend.git /tmp/c1 >/dev/null 2>&1
+          tc=$(( $(date +%s) - t0 ))
+          if [ -d /tmp/c1/.git ]; then note "5a 直连 github clone" soft ok "成员侧阵发不通属已知" "${tc}s"; else note "5a 直连 github clone" soft fail "允许不通" "${tc}s 失败（与观测一致：NPU 节点到 github 阵发超时）"; fi
+          t0=$(date +%s); timeout 180 git clone -q --depth 1 "$GITCDN/vllm-project/vllm-ascend.git" /tmp/c2 >/dev/null 2>&1
+          td=$(( $(date +%s) - t0 ))
+          if [ -d /tmp/c2/.git ]; then note "5b 经成员 git-cdn clone" hard ok "成功" "${td}s HEAD=$(git -C /tmp/c2 rev-parse --short HEAD)"; else note "5b 经成员 git-cdn clone" hard fail "成功" "${td}s 失败"; fi
+          if git config --global --get 'url.http://git-cdn-service.git-cdn.svc.cluster.local:8000/.insteadOf' >/dev/null 2>&1; then
+            note "5c 模板自带 insteadOf→git-cdn" soft ok "-" "runner 已注入"
+          else
+            note "5c 模板自带 insteadOf→git-cdn" soft info "成员干净模板刻意没有" "生产模板靠 inject-squid-ca.sh 注入；成员无 squid ⇒ 若要复用 git-cdn 需把 insteadOf 独立注入（见汇总建议）"
+          fi
+
+      - name: 6. pip 三条源（默认 / 华为云 / 成员内缓存）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          t0=$(date +%s); timeout 90 pip download -q --no-deps -d /tmp/p0 six >/dev/null 2>&1; d0=$(( $(date +%s) - t0 ))
+          [ $? -eq 0 ] && note "6a pip 默认 pypi.org" soft info "成员侧预期不通" "${d0}s 居然成功" || note "6a pip 默认 pypi.org" soft ok "不通（符合预期）" "${d0}s 失败 ⇒ 业务必须显式配 index"
+          timeout 120 pip download -q --no-deps -d /tmp/p1 -i "$PYPI_MIRROR" six >/dev/null 2>&1 \
+            && note "6b pip 华为云直连" hard ok "成功" "wheel 落地" || note "6b pip 华为云直连" hard fail "成功" "失败"
+          timeout 150 pip download -q --no-deps -d /tmp/p2 -i "$PYPI_CACHE" --trusted-host cache-service.nginx-pypi-cache.svc.cluster.local six >/dev/null 2>&1 \
+            && note "6c pip 经成员 pypi 缓存" hard ok "成功" "走 svc 命中缓存" || note "6c pip 经成员 pypi 缓存" soft fail "成功（应可）" "缓存 svc 不可用，见下条定位"
+          echo "  定位：$(timeout 15 curl -s -o /dev/null -w '%{http_code}' "${PYPI_CACHE}pypi/simple/six/" 2>/dev/null || echo 连接失败)"
+
+      - name: 7. 模型与数据集通道（modelscope / hf-mirror / huggingface）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          printf "  %-28s " "www.modelscope.cn"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://www.modelscope.cn 2>/dev/null || echo FAIL
+          printf "  %-28s " "hf-mirror.com";     timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://hf-mirror.com 2>/dev/null || echo FAIL
+          printf "  %-28s " "huggingface.co";    timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://huggingface.co 2>/dev/null || echo FAIL
+          if command -v modelscope >/dev/null 2>&1 || python3 -c "import modelscope" >/dev/null 2>&1; then
+            mkdir -p /tmp/ms
+            python3 - > /tmp/e2e/ms.log 2>&1 <<'PY'
+          from modelscope.hub.snapshot_download import snapshot_download
+          print(snapshot_download('Qwen/Qwen2-0.5B', allow_patterns=['config.json'], cache_dir='/tmp/ms'))
+          PY
+            rc=$?
+            if [ $rc -eq 0 ]; then note "7a modelscope 拉小文件" hard ok "成功" "$(tail -1 /tmp/e2e/ms.log)"; else note "7a modelscope 拉小文件" hard fail "成功" "$(tail -2 /tmp/e2e/ms.log | tr '\n' ' ')"; fi
+          else
+            note "7a modelscope 拉小文件" soft info "镜像未装" "先 pip install modelscope（走 6c 源）再测"
+          fi
+          timeout 12 curl -s -o /dev/null https://huggingface.co 2>/dev/null && note "7b huggingface.co" soft info "成员侧预期不通" "居然可达" || note "7b huggingface.co" soft ok "不通（符合预期）" "业务需走 modelscope/hf-mirror"
+
+      - name: 8. 共享卷与缓存复用（成员侧能力）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          if mount | grep -q " /root/.cache "; then
+            note "8a job pod 挂了 shared-volume" hard ok "挂上" "$(mount | grep -o '^[^ ]* on /root/.cache type [a-z0-9]*')"
+            mkdir -p /root/.cache/e2e-probe && echo "$GITHUB_RUN_ID" > /root/.cache/e2e-probe/marker && note "8b 共享盘可写" hard ok "可写" "marker 已写，跨 job 可复用"
+          elif [ -d "$NFS_SHARE_HOST_DIR" ]; then
+            note "8a job pod 挂了 shared-volume" soft fail "应由模板挂上" "宿主目录在 pod 里可见但没挂卷"
+          else
+            note "8a job pod 挂了 shared-volume" soft info "成员干净模板刻意没有" "宿主侧 /mnt/sfs-local/... 已由 sfs-local-provisioner bind 出来；要在业务里复用需模板加该 hostPath（现已可挂）"
+          fi
+          df -h / | tail -1 | sed 's/^/  overlay 根盘: /'
+
+      - name: 9. 凭据与系统包源（OBS AK/SK、apt）
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then note "9a OBS 凭据（AWS_*）" soft ok "-" "生产模板 envFrom 带下来了"; else note "9a OBS 凭据（AWS_*）" soft info "成员干净模板无 envFrom" "要复用 OBS 缓存桶需把 envFrom 加回（生产模板有，且我已设 optional: true）"; fi
+          if command -v apt-get >/dev/null 2>&1; then
+            t0=$(date +%s); timeout 90 apt-get update -qq >/dev/null 2>&1 && note "9b apt 源可用" soft ok "可用" "$(( $(date +%s) - t0 ))s" || note "9b apt 源可用" soft fail "可用（成员需 apt 缓存或直连）" "见 squid apt/deb 缓存是否覆盖本集群"
+          else
+            note "9b apt 源可用" soft info "非 apt 系镜像" "openEuler 走 dnf"
+          fi
+
+      - name: 10. 与 GitHub 控制面与产物通道
+        continue-on-error: true
+        run: |
+          source /tmp/e2e/fn.sh
+          printf "  %-30s " "api.github.com"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://api.github.com 2>/dev/null || echo FAIL
+          printf "  %-30s " "objects.githubusercontent.com"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://objects.githubusercontent.com 2>/dev/null || echo FAIL
+          printf "  %-30s " "ghcr.io"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://ghcr.io 2>/dev/null || echo FAIL
+          printf "  %-30s " "registry-1.docker.io"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://registry-1.docker.io/v2/ 2>/dev/null || echo FAIL
+          printf "  %-30s " "quay.io"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" https://quay.io 2>/dev/null || echo FAIL
+          printf "  %-30s " "gh-proxy.test.osinfra.cn"; timeout 12 curl -s -o /dev/null -w "%{http_code}\n" "https://gh-proxy.test.osinfra.cn" 2>/dev/null || echo FAIL
+
+      - name: 11. artifact 上传（产物链路）
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-ascend-scenario-${{ inputs.runner_label }}
+          path: /tmp/e2e/
+          if-no-files-found: warn
+
+      - name: 汇总：能力矩阵 + 硬失败判定
+        run: |
+          source /tmp/e2e/fn.sh
+          echo "## 成员集群能力探测（$(date -u '+%F %R UTC')）" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 能力 | 级别 | 结果 | 预期 | 说明 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          awk -F'\t' '{printf "| %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5}' /tmp/e2e/res.tsv >> "$GITHUB_STEP_SUMMARY"
+          hard_fail=$(awk -F'\t' '$2=="hard" && $3=="fail"{c++} END{print c+0}' /tmp/e2e/res.tsv)
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**硬前置失败项：${hard_fail}**" >> "$GITHUB_STEP_SUMMARY"
+          echo
+          column -t -s $'\t' /tmp/e2e/res.tsv || true
+          echo
+          if [ "${NODE_NAME:-}" ]; then echo "落点 node=${NODE_NAME} pod=${POD_NAMESPACE}/${POD_NAME}"; fi
+          [ "${hard_fail}" = "0" ] || { echo "::error::有 ${hard_fail} 个硬前置失败，见 job summary"; exit 1; }
