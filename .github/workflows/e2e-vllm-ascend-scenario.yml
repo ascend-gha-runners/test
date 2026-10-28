@@ -115,24 +115,24 @@ jobs:
           stack=$(cat /tmp/e2e/stack.txt 2>/dev/null || echo '{}')
           echo "$stack" > "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           if [[ "$stack" == *"\"torch\": \"FAIL"* ]]; then
-            note "3 torch/torch_npu/vllm import" hard fail "全部可 import" "$stack"
+            note "3 torch/torch_npu/vllm import" stack fail "全部可 import" "$stack"
           else
-            note "3 torch/torch_npu/vllm import" hard ok "至少 torch+torch_npu" "$stack"
+            note "3 torch/torch_npu/vllm import" stack ok "至少 torch+torch_npu" "$stack"
           fi
-          [ "$(cat /tmp/e2e/npucnt 2>/dev/null)" = "1" ] && note "3b torch 能枚举 NPU" hard ok "true" "device_count 可读" || note "3b torch 能枚举 NPU" hard fail "true" "torch.npu.is_available 为假"
+          [ "$(cat /tmp/e2e/npucnt 2>/dev/null)" = "1" ] && note "3b torch 能枚举 NPU" stack ok "true" "device_count 可读" || note "3b torch 能枚举 NPU" stack fail "true" "torch.npu.is_available 为假"
 
       - name: 4. 小推理（真跑一次 matmul on NPU）
         continue-on-error: true
         run: |
           source /tmp/e2e/fn.sh
-          python3 - > /tmp/e2e/matmul.log 2>&1 <<'PY'
+          rc=0
+          python3 - > /tmp/e2e/matmul.log 2>&1 <<'PY' || rc=$?
           import torch, torch_npu
           a = torch.randn(512, 512, device="npu")
           b = torch.randn(512, 512, device="npu")
           print("matmul ok, mean=", (a @ b).float().mean().item())
           PY
-          rc=$?
-          if [ $rc -eq 0 ]; then note "4 NPU matmul 实跑" hard ok "成功" "$(tail -1 /tmp/e2e/matmul.log)"; else note "4 NPU matmul 实跑" hard fail "成功" "$(tail -2 /tmp/e2e/matmul.log | tr '\n' ' ')"; fi
+          if [ $rc -eq 0 ]; then note "4 NPU matmul 实跑" stack hard ok "成功" "$(tail -1 /tmp/e2e/matmul.log)"; else note "4 NPU matmul 实跑" stack fail "成功" "$(tail -2 /tmp/e2e/matmul.log | tr '\n' ' ')"; fi
 
       - name: 5. 代码拉取三条路（直连 / 经 git-cdn / insteadOf 是否已配）
         continue-on-error: true
@@ -140,10 +140,10 @@ jobs:
           source /tmp/e2e/fn.sh
           command -v git >/dev/null || { note "5 git 可用" hard fail "有 git" "镜像无 git，后续 clone 探测跳过"; exit 0; }
           rm -rf /tmp/c1 /tmp/c2
-          t0=$(date +%s); timeout 120 git clone -q --depth 1 https://github.com/vllm-project/vllm-ascend.git /tmp/c1 >/dev/null 2>&1
+          t0=$(date +%s); timeout 120 git clone -q --depth 1 https://github.com/vllm-project/vllm-ascend.git /tmp/c1 >/dev/null 2>&1 || true
           tc=$(( $(date +%s) - t0 ))
           if [ -d /tmp/c1/.git ]; then note "5a 直连 github clone" soft ok "成员侧阵发不通属已知" "${tc}s"; else note "5a 直连 github clone" soft fail "允许不通" "${tc}s 失败（与观测一致：NPU 节点到 github 阵发超时）"; fi
-          t0=$(date +%s); timeout 180 git clone -q --depth 1 "$GITCDN/vllm-project/vllm-ascend.git" /tmp/c2 >/dev/null 2>&1
+          t0=$(date +%s); timeout 180 git clone -q --depth 1 "$GITCDN/vllm-project/vllm-ascend.git" /tmp/c2 >/dev/null 2>&1 || true
           td=$(( $(date +%s) - t0 ))
           if [ -d /tmp/c2/.git ]; then note "5b 经成员 git-cdn clone" hard ok "成功" "${td}s HEAD=$(git -C /tmp/c2 rev-parse --short HEAD)"; else note "5b 经成员 git-cdn clone" hard fail "成功" "${td}s 失败"; fi
           if git config --global --get 'url.http://git-cdn-service.git-cdn.svc.cluster.local:8000/.insteadOf' >/dev/null 2>&1; then
@@ -178,7 +178,7 @@ jobs:
           print(snapshot_download('Qwen/Qwen2-0.5B', allow_patterns=['config.json'], cache_dir='/tmp/ms'))
           PY
             rc=$?
-            if [ $rc -eq 0 ]; then note "7a modelscope 拉小文件" hard ok "成功" "$(tail -1 /tmp/e2e/ms.log)"; else note "7a modelscope 拉小文件" hard fail "成功" "$(tail -2 /tmp/e2e/ms.log | tr '\n' ' ')"; fi
+            if [ $rc -eq 0 ]; then note "7a modelscope 拉小文件" stack ok "成功" "$(tail -1 /tmp/e2e/ms.log)"; else note "7a modelscope 拉小文件" stack fail "成功" "$(tail -2 /tmp/e2e/ms.log | tr '\n' ' ')"; fi
           else
             note "7a modelscope 拉小文件" soft info "镜像未装" "先 pip install modelscope（走 6c 源）再测"
           fi
