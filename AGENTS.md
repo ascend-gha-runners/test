@@ -102,6 +102,10 @@ gh workflow run e2e-feature-crates-cache.yml --repo ascend-gha-runners/test
 # 全集群 Runner 联通性与双标签验证
 gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
 
+# 联邦 runner 烟测（arc-fedsched a3-560t：单标签 linux-aarch64-a3-560t-2，
+# 落点在 cn12-001 / aiframework / mind-third-ci 之间动态分配，不能加集群双标签）
+gh workflow run arc-fedsched-e2e-a3-560t.yml --repo ascend-gha-runners/test
+
 # 烟测与全链路用例
 gh workflow run e2e-gy006-a2-runner-smoke.yml --repo ascend-gha-runners/test
 gh workflow run e2e-gy006-nginx-cache.yml   --repo ascend-gha-runners/test
