@@ -1,0 +1,61 @@
+name: probe-triton-post2
+# 定位 triton-ascend==3.6.0.post2 找不到：对比直连 CDN(repo/mirrors) vs 内网 cache-service
+# 在 linux-amd64-cpu-2 (mind-third-ci) 上跑，镜像与 vllm-ascend CI 一致
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: linux-amd64-cpu-2
+    timeout-minutes: 20
+    container:
+      image: quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12
+    steps:
+      - name: 环境与 DNS 解析
+        run: |
+          echo "arch=$(uname -m) python=$(python3 --version 2>&1)"
+          for h in repo.huaweicloud.com mirrors.huaweicloud.com cache-service.nginx-pypi-cache.svc.cluster.local; do
+            ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1}' | head -1)
+            echo "DNS $h → ${ip:-解析失败}"
+          done
+
+      - name: 1. 直连 repo.huaweicloud.com（vllm-ascend CI 的 extra index）
+        run: |
+          echo "=== HEAD ==="
+          curl -sI --max-time 20 https://repo.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
+            | grep -iE '^HTTP|^Expires|^Last-Modified|^via|^Age|^x-ccdn|^X-Cache|^x-hcs'
+          echo "=== body 中 3.6.0.post2 出现次数 ==="
+          n=$(curl -s --max-time 20 https://repo.huaweicloud.com/ascend/repos/pypi/triton-ascend/ | grep -c '3\.6\.0\.post2' || true)
+          echo "post2 count = $n"
+
+      - name: 2. 直连 mirrors.huaweicloud.com（310p 路径用的域名）
+        run: |
+          echo "=== HEAD ==="
+          curl -sI --max-time 20 https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
+            | grep -iE '^HTTP|^Expires|^Last-Modified|^via|^Age|^x-ccdn|^X-Cache|^x-hcs'
+          echo "=== body 中 3.6.0.post2 出现次数 ==="
+          n=$(curl -s --max-time 20 https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ | grep -c '3\.6\.0\.post2' || true)
+          echo "post2 count = $n"
+
+      - name: 3. 走内网 cache-service
+        run: |
+          echo "=== HEAD ==="
+          curl -sI --max-time 20 http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi/triton-ascend/ \
+            | grep -iE '^HTTP|^Expires|^Last-Modified|^via|^Age|^x-ccdn|^X-Cache|^x-hcs'
+          echo "=== body 中 3.6.0.post2 出现次数 ==="
+          n=$(curl -s --max-time 20 http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi/triton-ascend/ | grep -c '3\.6\.0\.post2' || true)
+          echo "post2 count = $n"
+
+      - name: 4. 复现 vllm-ascend CI：直连 CDN 当 extra index 装 triton-ascend
+        run: |
+          pip install uv -q 2>&1 | tail -1
+          export UV_SYSTEM_PYTHON=1 UV_NO_CACHE=1 UV_INDEX_STRATEGY=unsafe-best-match
+          export UV_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+          export UV_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+          export UV_INSECURE_HOST="cache-service.nginx-pypi-cache.svc.cluster.local"
+          echo "=== UV env ==="
+          env | grep -i '^UV_' | sort
+          echo "=== install triton-ascend==3.6.0.post2 ==="
+          uv pip install --no-cache --force-reinstall --no-deps "triton-ascend==3.6.0.post2" 2>&1
+          echo "EXIT=$?"
