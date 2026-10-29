@@ -58,7 +58,8 @@ jobs:
           set -euo pipefail
           # pod-templates 里 huawei.com/ascend-1980 申请 2 卡；这里按 npu-smi 输出里的
           # 芯片行数核对，数量不符只 WARN，不阻断（不同 CANN 版本输出格式有差异）。
-          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' || true)
+          # 每张卡在 `npu-smi info` 里是一行 `| <npu> Ascend9xx |`，故数 Ascend 行。
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' || true)
           echo "detected_npu_rows=${chips} (expected 2)"
           if [ "${chips}" != "2" ]; then
             echo "::warning::npu-smi 芯片行数为 ${chips}，期望 2；请人工确认卡数"
@@ -104,7 +105,7 @@ jobs:
               ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
               arch=$(grep '^arch=' "$f" | cut -d= -f2-)
               cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
-              npus=$(grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' "$f" || true)
+              npus=$(grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' "$f" || true)
               echo "| $task | $pod | $ip | $arch | $cpus | $npus |"
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
