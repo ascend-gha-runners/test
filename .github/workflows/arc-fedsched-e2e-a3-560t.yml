@@ -1,7 +1,8 @@
 name: arc-fedsched e2e (a3-560t)
 
 # 联邦 runner 烟测：单个 scale set linux-aarch64-a3-560t-2 由 arc-fedsched dispatcher
-# 在 cn12-001 / aiframework / mind-third-ci 三家成员之间分配。
+# 在 cn12-001 / mind-third-ci 两家成员之间分配（aiframework 因成员节点同名冲突
+# 暂时从 federation 下线，待代码修复后恢复）。
 # 因为落点是动态的，这里只写一个标签，不能像 e2e-cluster-runners 那样用
 # `[型号, 集群]` 双标签把集群钉死；要判断落到哪个集群，看运行结束后 CP 上的
 # ResourceBinding / 本工作流打印的 pod 名与 pod IP。
@@ -19,6 +20,11 @@ jobs:
         task: [1, 2, 3, 4, 5, 6]
     runs-on: linux-aarch64-a3-560t-2
     timeout-minutes: 30
+    # 带 container 的 job 默认 shell 是 sh（dash），不支持 `set -o pipefail`；
+    # 本 workflow 的断言步骤用了 pipefail，必须显式指定 bash。
+    defaults:
+      run:
+        shell: bash
     container:
       # A3（910C）CANN 镜像；job 容器的镜像/资源由成员侧 pod-templates
       # ConfigMap（linux-aarch64-a3-560t-2）套用，本字段只提供 image。
