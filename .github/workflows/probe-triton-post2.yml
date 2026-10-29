@@ -7,7 +7,7 @@ on:
 
 jobs:
   probe:
-    runs-on: linux-amd64-cpu-2
+    runs-on: [linux-amd64-cpu-2, mind-third-ci]
     timeout-minutes: 20
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
