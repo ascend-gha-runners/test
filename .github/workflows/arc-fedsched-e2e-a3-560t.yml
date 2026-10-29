@@ -1,0 +1,104 @@
+name: arc-fedsched e2e (a3-560t)
+
+# 联邦 runner 烟测：单个 scale set linux-aarch64-a3-560t-2 由 arc-fedsched dispatcher
+# 在 cn12-001 / aiframework / mind-third-ci 三家成员之间分配。
+# 因为落点是动态的，这里只写一个标签，不能像 e2e-cluster-runners 那样用
+# `[型号, 集群]` 双标签把集群钉死；要判断落到哪个集群，看运行结束后 CP 上的
+# ResourceBinding / 本工作流打印的 pod 名与 pod IP。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fanout:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6]
+    runs-on: linux-aarch64-a3-560t-2
+    timeout-minutes: 30
+    container:
+      # A3（910C）CANN 镜像；job 容器的镜像/资源由成员侧 pod-templates
+      # ConfigMap（linux-aarch64-a3-560t-2）套用，本字段只提供 image。
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - name: 【信息项】where am i
+        run: |
+          {
+            echo "task=${{ matrix.task }}"
+            echo "pod=${POD_NAMESPACE:-?}/${POD_NAME:-?}"
+            echo "pod_ip=$(hostname -I 2>/dev/null | awk '{print $1}')"
+            echo "arch=$(uname -m)"
+            echo "cpus=$(nproc)"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-${{ matrix.task }}.txt
+
+      - name: 【硬断言】NPU 设备可用
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/davinci_manager ]; then
+            echo "::error::未发现 /dev/davinci_manager，job 容器没有拿到 NPU 设备"
+            exit 1
+          fi
+          npu-smi info >/dev/null
+          echo "npu-smi info OK"
+
+      - name: 【软断言】本任务分到 2 张卡
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # pod-templates 里 huawei.com/ascend-1980 申请 2 卡；这里按 npu-smi 输出里的
+          # 芯片行数核对，数量不符只 WARN，不阻断（不同 CANN 版本输出格式有差异）。
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' || true)
+          echo "detected_npu_rows=${chips} (expected 2)"
+          if [ "${chips}" != "2" ]; then
+            echo "::warning::npu-smi 芯片行数为 ${chips}，期望 2；请人工确认卡数"
+          fi
+
+      - name: 【信息项】squid 代理链路
+        continue-on-error: true
+        run: |
+          echo "HTTP_PROXY=${HTTP_PROXY:-<empty>}"
+          curl -sS -o /dev/null -w 'via-proxy https://pypi.org/simple/ -> %{http_code}\n' \
+            -x "${HTTP_PROXY:-http://squid-cache.squid.svc.cluster.local:3128}" \
+            https://pypi.org/simple/ || echo "::warning::经 squid 访问 pypi 失败（仅信息项）"
+
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [fanout]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
+        run: |
+          {
+            echo "### arc-fedsched a3-560t 分配结果"
+            echo
+            echo "| task | pod | pod ip | arch | cpus | NPUs |"
+            echo "|---|---|---|---|---|---|"
+            for f in artifacts/probe-*/probe-*.txt; do
+              [ -f "$f" ] || continue
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              pod=$(grep '^pod=' "$f" | cut -d= -f2-)
+              ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
+              arch=$(grep '^arch=' "$f" | cut -d= -f2-)
+              cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
+              npus=$(grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' "$f" || true)
+              echo "| $task | $pod | $ip | $arch | $cpus | $npus |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
