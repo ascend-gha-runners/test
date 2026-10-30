@@ -1,12 +1,21 @@
 name: arc-fedsched e2e (a3-560t)
 
 # 联邦 runner 烟测：单个 scale set linux-aarch64-a3-560t-2 由 arc-fedsched dispatcher
-# 在 cn12-001 / aiframework / mind-third-ci 三家成员之间分配。
+# 在 aiframework / cn12-001 / mind-third-ci 三家成员之间分配。
 # 因为落点是动态的，这里只写一个标签，不能像 e2e-cluster-runners 那样用
 # `[型号, 集群]` 双标签把集群钉死；要判断落到哪个集群，看运行结束后 CP 上的
-# ResourceBinding / 本工作流打印的 pod 名与 pod IP。
+# ResourceBinding / 本工作流打印的 pod 名与 pod IP，或 dispatcher 的决策日志。
+#
+# 一个 workflow 覆盖不同规模：task_list 传 JSON 数组。
+#   T1/T2 基础烟测 + ER 回收：'[1,2,3,4,5,6]'
+#   T3 负载均衡：'[1..12]' 或 '[1..24]'
 on:
   workflow_dispatch:
+    inputs:
+      task_list:
+        description: 'JSON 数组，本次并发的任务编号，如 [1,2,3,4,5,6]（T1/T2 用 6 个，T3 用 12 或 24 个）'
+        required: false
+        default: '[1,2,3,4,5,6]'
 
 permissions:
   contents: read
@@ -16,9 +25,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        task: [1, 2, 3, 4, 5, 6]
+        task: ${{ fromJSON(inputs.task_list || '[1,2,3,4,5,6]') }}
     runs-on: linux-aarch64-a3-560t-2
     timeout-minutes: 30
+    # 带 container 的 job 默认 shell 是 sh（dash），不支持 `set -o pipefail`；
+    # 本 workflow 的断言步骤用了 pipefail，必须显式指定 bash。
+    defaults:
+      run:
+        shell: bash
     container:
       # A3（910C）CANN 镜像；job 容器的镜像/资源由成员侧 pod-templates
       # ConfigMap（linux-aarch64-a3-560t-2）套用，本字段只提供 image。
@@ -28,6 +42,7 @@ jobs:
         run: |
           {
             echo "task=${{ matrix.task }}"
+            echo "started_at=$(date -u +%FT%TZ)"
             echo "pod=${POD_NAMESPACE:-?}/${POD_NAME:-?}"
             echo "pod_ip=$(hostname -I 2>/dev/null | awk '{print $1}')"
             echo "arch=$(uname -m)"
@@ -52,7 +67,8 @@ jobs:
           set -euo pipefail
           # pod-templates 里 huawei.com/ascend-1980 申请 2 卡；这里按 npu-smi 输出里的
           # 芯片行数核对，数量不符只 WARN，不阻断（不同 CANN 版本输出格式有差异）。
-          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' || true)
+          # 每张卡在 `npu-smi info` 里是一行 `| <npu> Ascend9xx |`，故数 Ascend 行。
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' || true)
           echo "detected_npu_rows=${chips} (expected 2)"
           if [ "${chips}" != "2" ]; then
             echo "::warning::npu-smi 芯片行数为 ${chips}，期望 2；请人工确认卡数"
@@ -98,7 +114,7 @@ jobs:
               ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
               arch=$(grep '^arch=' "$f" | cut -d= -f2-)
               cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
-              npus=$(grep -cE '^\| [0-9]+ +[0-9]+[A-Za-z]+ +\|' "$f" || true)
+              npus=$(grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' "$f" || true)
               echo "| $task | $pod | $ip | $arch | $cpus | $npus |"
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
