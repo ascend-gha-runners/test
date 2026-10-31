@@ -1,0 +1,112 @@
+name: arc-fedsched e2e (a2-1980)
+
+# 联邦 runner 烟测（2 卡档）：linux-aarch64-a2-2-fed 由 arc-fedsched dispatcher 在
+# ascend-hk-001 / karc / wlcb-001 / gy-001 四家成员之间动态分配，落点是动态的，
+# 所以只写一个标签，不能用 [型号, 集群] 双标签把集群钉死。
+#
+# 集群/节点归属以 CP 上的 ResourceBinding 为准；作业内能自报的是 pod 名（hostname，
+# hooks 生成的 <runner>-workflow pod 的名字）与 pod IP，配合 CP 侧 pod 列表即可反查
+# 到成员集群与节点。
+#
+# 任务数刻意设为 9：federation 配置里 grant.maxPerCluster=8，同一成员最多同时拿到
+# 8 个 grant，第 9 个必然溢出到其它成员——用来验证「不只 hk 能跑，线下 karc 等成员
+# 也能跑」。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fanout:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    runs-on: linux-aarch64-a2-2-fed
+    timeout-minutes: 40
+    container:
+      # A2（910B）CANN 镜像；资源（2 张 910B / 46C128G）由成员侧 pod-templates
+      # ConfigMap（linux-aarch64-a2-2-fed）套用，本字段只提供 image。
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 【信息项】where am i
+        run: |
+          {
+            echo "task=${{ matrix.task }}"
+            # hooks 生成的作业 pod 名为 <runner-pod>-workflow，hostname 即 pod 名。
+            echo "pod=$(hostname)"
+            echo "pod_ip=$(awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print $1; exit}' /etc/hosts)"
+            echo "apiserver=${KUBERNETES_SERVICE_HOST:-?}:${KUBERNETES_SERVICE_PORT:-?}"
+            echo "arch=$(uname -m)"
+            echo "cpus=$(nproc)"
+            echo "ci=${CI:-?}  runner_name=${RUNNER_NAME:-?}"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-${{ matrix.task }}.txt
+
+      - name: 【硬断言】NPU 设备可用
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/davinci_manager ]; then
+            echo "::error::未发现 /dev/davinci_manager，job 容器没有拿到 NPU 设备"
+            exit 1
+          fi
+          npu-smi info >/dev/null
+          echo "npu-smi info OK"
+
+      - name: 【硬断言】本任务分到 2 张卡
+        run: |
+          set -euo pipefail
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' || true)
+          echo "detected_chips=${chips} (expected 2)"
+          if [ "${chips}" != "2" ]; then
+            echo "::error::npu-smi 芯片行数为 ${chips}，期望 2"
+            exit 1
+          fi
+
+      - name: 【信息项】squid 代理链路
+        continue-on-error: true
+        run: |
+          echo "HTTP_PROXY=${HTTP_PROXY:-<empty>}"
+          curl -sS -o /dev/null -w 'via-proxy https://pypi.org/simple/ -> %{http_code}\n' \
+            -x "${HTTP_PROXY:-http://squid-cache.squid.svc.cluster.local:3128}" \
+            https://pypi.org/simple/ || echo "::warning::经 squid 访问 pypi 失败（仅信息项）"
+
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [fanout]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
+        run: |
+          {
+            echo "### arc-fedsched a2-1980 分配结果（2 卡档，9 任务）"
+            echo
+            echo "| task | pod | pod ip | apiserver | arch | cpus | chips |"
+            echo "|---|---|---|---|---|---|---|"
+            for f in artifacts/probe-*/probe-*.txt; do
+              [ -f "$f" ] || continue
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              pod=$(grep '^pod=' "$f" | cut -d= -f2-)
+              ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
+              api=$(grep '^apiserver=' "$f" | cut -d= -f2-)
+              arch=$(grep '^arch=' "$f" | cut -d= -f2-)
+              cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
+              chips=$(grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' "$f" || true)
+              echo "| $task | $pod | $ip | $api | $arch | $cpus | $chips |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
