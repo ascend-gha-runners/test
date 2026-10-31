@@ -51,6 +51,7 @@ jobs:
             echo "apiserver=$apiserver"
             echo "arch=$(uname -m)"
             echo "cpus=$(nproc)"
+            echo "shell_bash=$(command -v bash || echo missing)"
             echo "--- npu-smi info ---"
             npu-smi info
           } | tee /tmp/probe-${{ matrix.task }}.txt
@@ -58,7 +59,9 @@ jobs:
 
       - name: 【硬断言】NPU 设备可用
         run: |
-          set -euo pipefail
+          # 注意：不要写 set -o pipefail —— runner 可能以 `sh -e`（dash）执行本步骤，
+          # dash 不支持 pipefail 会直接以非零码退出、且不打印任何输出。
+          set -eu
           if [ ! -c /dev/davinci_manager ]; then
             echo "::error::未发现 /dev/davinci_manager，job 容器没有拿到 NPU 设备"
             exit 1
@@ -69,10 +72,10 @@ jobs:
       - name: 【软断言】本任务分到 2 张卡
         continue-on-error: true
         run: |
-          set -euo pipefail
-          # pod-templates 里 huawei.com/ascend-1980 申请 2 卡；这里按 npu-smi 输出里的
-          # 芯片行数核对，数量不符只 WARN，不阻断（不同 CANN 版本输出格式有差异）。
-          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' || true)
+          # 同上：保持 POSIX，避免 dash 不支持 pipefail
+          set -eu
+          # A3 的 npu-smi 输出里，每张卡占一个块，块首行为 `| <NPU> Ascend9xx |`，数 Ascend 行即为卡数。
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' || true)
           echo "detected_npu_rows=${chips} (expected 2)"
           if [ "${chips}" != "2" ]; then
             echo "::warning::npu-smi 芯片行数为 ${chips}，期望 2；请人工确认卡数"
@@ -122,7 +125,7 @@ jobs:
               apiserver=$(grep '^apiserver=' "$f" | cut -d= -f2-)
               arch=$(grep '^arch=' "$f" | cut -d= -f2-)
               cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
-              npus=$(grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' "$f" || true)
+              npus=$(grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' "$f" || true)
               echo "| $task | $cluster | $node | $pod | $ns | $ip | $apiserver | $arch | $cpus | $npus |"
             done
             echo
