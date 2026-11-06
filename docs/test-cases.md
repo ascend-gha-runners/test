@@ -43,7 +43,7 @@ flowchart TD
 | [`TC-FEAT-YUM`](#tc-feat-yum) | openEuler YUM / DNF 缓存 | [YUM Cache (Port 8083)](https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083) | 8083 (HTTP) | `dnf`, `yum` | `e2e-feature-yum-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-GO`](#tc-feat-go) | Go modules 下载与运行 | [Go Cache (Port 8084)](https://ascend-gha-runners.github.io/docs/feature/) | 8084 (HTTP) | `go` | `e2e-feature-go-cache.yml` | golang:1.23-bookworm |
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
-| [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | Host Environment（Runner Pod 自带 git） |
+| [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | openEuler CANN 8.2（root，HOME=/root） |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
 
@@ -286,7 +286,7 @@ cargo build
 - **官方文档**：[backlog#2885 git-cdn 加限速识别，快失败重试](https://github.com/opensourceways/backlog/issues/2885)
 - **关联工作流**：`.github/workflows/e2e-feature-git-cdn.yml`
 - **执行范围**：全部 13 集群（runners.json 每集群择一 Runner，优先 CPU；同集群 cpu/npu 共享同一套集群级 git-cdn 实例）
-- **默认执行镜像**：Host Environment（Runner Pod 自带 git，真实用户环境，不做容器隔离）
+- **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`（root / HOME=/root，与 vllm-ascend CI 同款——pod template postStart 写入 /root/.gitconfig 的 git-cdn 重写在该容器内即为生效全局配置；不指定镜像会落到 HOME=/home/runner 的 runner 镜像，注入不可见）
 - **修复基线**：ascend-ci-deployment `422793a8c`（git-cdn 回源 gitconfig 注入 `http.lowSpeedLimit=1MiB/s` / `http.lowSpeedTime=60`，限速流快失败并交给 backoff 重试，全部集群生效）
 
 #### 2. 测试目的

@@ -164,7 +164,7 @@
       "client": ["git"],
       "workflow": ".github/workflows/e2e-feature-git-cdn.yml",
       "engine_scenario": "git_cdn",
-      "default_container": null,
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
       "target_clusters": "all",
       "assertions": {
         "hard": [
