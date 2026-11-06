@@ -212,6 +212,11 @@ jobs:
           python3 -m pip show triton-ascend
           echo "✓ triton-ascend installed successfully via internal ascend repo"
 
+          echo "=== 补装 triton-ascend 运行时导入依赖 pybind11（步骤4使用 --no-deps）==="
+          uv --no-config pip install --no-cache pybind11
+          python3 -c "import pybind11; print('pybind11', pybind11.__version__)"
+          echo "✓ pybind11 installed via internal pypi"
+
       - name: 【用户视角场景】HTTP wheel/metadata 字节完整性抽样（与宿主架构无关）
         id: wheel-integrity
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_wheel_bytes }}

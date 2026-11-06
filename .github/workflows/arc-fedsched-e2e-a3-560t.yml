@@ -1,0 +1,133 @@
+name: arc-fedsched e2e (a3-560t)
+
+# 联邦 runner 烟测：单个 scale set linux-aarch64-a3-560t-2 由 arc-fedsched dispatcher
+# 在 cn12-001 / aiframework / mind-third-ci 三家成员之间分配。
+# 因为落点是动态的，这里只写一个标签，不能像 e2e-cluster-runners 那样用
+# `[型号, 集群]` 双标签把集群钉死；要判断落到哪个集群，看本工作流打印的
+# pod / node / cluster(推断)，CP 上的 ResourceBinding / dispatcher timeline 是最终权威。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fanout:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6]
+    runs-on: linux-aarch64-a3-560t-2
+    timeout-minutes: 30
+    container:
+      # A3（910C）CANN 镜像；job 容器的镜像/资源由成员侧 pod-templates
+      # ConfigMap（linux-aarch64-a3-560t-2）套用，本字段只提供 image。
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - name: 【信息项】where am i
+        run: |
+          # 落点自报：集群名在容器内无法可靠取得（各成员 apiserver 都是 ClusterIP），
+          # 所以由 pod-templates 通过 downward API 注入 MY_POD_NAME / MY_NODE_NAME /
+          # MY_POD_IP / MY_POD_NAMESPACE，再按节点名反推成员集群。
+          # A3 三家成员节点名同在 192.168.0.x 段但两两不重复，可唯一反查。
+          pod=${MY_POD_NAME:-$(cat /etc/hostname 2>/dev/null)}
+          pod_ns=${MY_POD_NAMESPACE:-?}
+          node=${MY_NODE_NAME:-?}
+          pod_ip=${MY_POD_IP:-?}
+          apiserver=${KUBERNETES_SERVICE_HOST:-?}:${KUBERNETES_SERVICE_PORT:-?}
+          case "$node" in
+            192.168.0.109|192.168.0.125|192.168.0.151|192.168.0.163|192.168.0.192|192.168.0.233|192.168.0.237|192.168.0.240|192.168.0.34|192.168.0.48|192.168.0.68|192.168.0.80) cluster="cn12-001" ;;
+            192.168.0.155|192.168.0.24|192.168.0.52|192.168.0.53|192.168.0.69|192.168.0.77|192.168.0.82) cluster="aiframework" ;;
+            192.168.0.108|192.168.0.116|192.168.0.127|192.168.0.131|192.168.0.172|192.168.0.181|192.168.0.203|192.168.0.226|192.168.0.27) cluster="mind-third-ci" ;;
+            *) cluster="unknown" ;;
+          esac
+          {
+            echo "task=${{ matrix.task }}"
+            echo "pod=$pod"
+            echo "pod_ns=$pod_ns"
+            echo "node=$node"
+            echo "cluster=$cluster"
+            echo "pod_ip=$pod_ip"
+            echo "apiserver=$apiserver"
+            echo "arch=$(uname -m)"
+            echo "cpus=$(nproc)"
+            echo "shell_bash=$(command -v bash || echo missing)"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-${{ matrix.task }}.txt
+          echo "### task ${{ matrix.task }} → pod=$pod node=$node cluster=$cluster pod_ip=$pod_ip" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 【硬断言】NPU 设备可用
+        run: |
+          # 注意：不要写 set -o pipefail —— runner 可能以 `sh -e`（dash）执行本步骤，
+          # dash 不支持 pipefail 会直接以非零码退出、且不打印任何输出。
+          set -eu
+          if [ ! -c /dev/davinci_manager ]; then
+            echo "::error::未发现 /dev/davinci_manager，job 容器没有拿到 NPU 设备"
+            exit 1
+          fi
+          npu-smi info >/dev/null
+          echo "npu-smi info OK"
+
+      - name: 【软断言】本任务分到 2 张卡
+        continue-on-error: true
+        run: |
+          # 同上：保持 POSIX，避免 dash 不支持 pipefail
+          set -eu
+          # A3 的 npu-smi 输出里，每张卡占一个块，块首行为 `| <NPU> Ascend9xx |`，数 Ascend 行即为卡数。
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' || true)
+          echo "detected_npu_rows=${chips} (expected 2)"
+          if [ "${chips}" != "2" ]; then
+            echo "::warning::npu-smi 芯片行数为 ${chips}，期望 2；请人工确认卡数"
+          fi
+
+      - name: 【信息项】squid 代理链路
+        continue-on-error: true
+        run: |
+          echo "HTTP_PROXY=${HTTP_PROXY:-<empty>}"
+          curl -sS -o /dev/null -w 'via-proxy https://pypi.org/simple/ -> %{http_code}\n' \
+            -x "${HTTP_PROXY:-http://squid-cache.squid.svc.cluster.local:3128}" \
+            https://pypi.org/simple/ || echo "::warning::经 squid 访问 pypi 失败（仅信息项）"
+
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [fanout]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
+        run: |
+          {
+            echo "### arc-fedsched a3-560t 分配结果"
+            echo
+            echo "| task | cluster(推断) | node | pod | pod_ns | pod ip | apiserver | arch | cpus | NPUs |"
+            echo "|---|---|---|---|---|---|---|---|---|---|"
+            for f in artifacts/probe-*/probe-*.txt; do
+              [ -f "$f" ] || continue
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              cluster=$(grep '^cluster=' "$f" | cut -d= -f2-)
+              node=$(grep '^node=' "$f" | cut -d= -f2-)
+              pod=$(grep '^pod=' "$f" | cut -d= -f2-)
+              ns=$(grep '^pod_ns=' "$f" | cut -d= -f2-)
+              ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
+              apiserver=$(grep '^apiserver=' "$f" | cut -d= -f2-)
+              arch=$(grep '^arch=' "$f" | cut -d= -f2-)
+              cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
+              npus=$(grep -cE '^\| *[0-9]+ +Ascend[0-9A-Za-z]* +\|' "$f" || true)
+              echo "| $task | $cluster | $node | $pod | $ns | $ip | $apiserver | $arch | $cpus | $npus |"
+            done
+            echo
+            echo "> cluster 由节点名反推（成员节点名两两不重复）；权威判据看 CP 上 ResourceBinding / dispatcher timeline。"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

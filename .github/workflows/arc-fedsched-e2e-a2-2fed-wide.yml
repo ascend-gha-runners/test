@@ -1,0 +1,121 @@
+name: arc-fedsched e2e (a2-2fed-wide)
+
+# 联邦 runner 烟测（宽版）：任务量刻意超过 hk/wlcb/gy 的可用 grant，用来把落点\n# 逼到排名最后的 karc（best-fit 会优先填其它三家的碎片与空闲节点）。
+#
+# 1) scale set linux-aarch64-a2-2-fed 由 arc-fedsched a2-1980 dispatcher 在
+#    ascend-hk-001 / karc / wlcb-001 / gy-001 四家成员之间动态分配，落点不可预知，
+#    所以 runs-on 只写一个标签，不能用 [型号, 集群] 把集群钉死。
+# 2) 落点自报靠 pod 模板里注入的 downward API 环境变量（MY_POD_NAME /
+#    MY_NODE_NAME / MY_POD_IP，见 manifests/arc-fedsched/prod-cp-a2/pod-templates/）。
+#    容器内取不到集群名（各成员 apiserver 都是 ClusterIP，hk/wlcb/gy 甚至撞成
+#    10.247.0.1），但节点名四家不重复，可据此反推集群；CP 侧 ResourceBinding /
+#    Work 仍是最终权威。
+#
+# grant.maxPerCluster=8：同一成员最多 8 个并发 grant，任务更多时会溢出到其它成员。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fanout:
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+    runs-on: linux-aarch64-a2-2-fed
+    timeout-minutes: 40
+    container:
+      # A2（910B）CANN 镜像；job 容器的资源（2 张 910B）由成员侧 pod-templates
+      # ConfigMap（linux-aarch64-a2-2-fed）套用，本字段只提供 image。
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    steps:
+      - name: 【信息项】where am i
+        run: |
+          {
+            echo "task=${{ matrix.task }}"
+            echo "pod=${MY_POD_NAME:-$(cat /etc/hostname 2>/dev/null)}"
+            echo "pod_ns=${MY_POD_NAMESPACE:-?}"
+            echo "node=${MY_NODE_NAME:-?}"
+            echo "pod_ip=${MY_POD_IP:-?}"
+            echo "apiserver=${KUBERNETES_SERVICE_HOST:-?}:${KUBERNETES_SERVICE_PORT:-?}"
+            echo "arch=$(uname -m)"
+            echo "cpus=$(nproc)"
+            echo "ci=${CI:-?}  runner_name=${RUNNER_NAME:-?}"
+            echo "--- npu-smi info ---"
+            npu-smi info
+          } | tee /tmp/probe-${{ matrix.task }}.txt
+
+      - name: 【硬断言】NPU 设备可用
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/davinci_manager ]; then
+            echo "::error::未发现 /dev/davinci_manager，job 容器没有拿到 NPU 设备"
+            exit 1
+          fi
+          npu-smi info >/dev/null
+          echo "npu-smi info OK"
+
+      - name: 【硬断言】本任务分到 2 张卡
+        run: |
+          set -euo pipefail
+          chips=$(npu-smi info 2>/dev/null | grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' || true)
+          echo "detected_chips=${chips} (expected 2)"
+          if [ "${chips}" != "2" ]; then
+            echo "::error::npu-smi 芯片行数为 ${chips}，期望 2"
+            exit 1
+          fi
+
+      - name: 【信息项】squid 代理链路
+        continue-on-error: true
+        run: |
+          echo "HTTP_PROXY=${HTTP_PROXY:-<empty>}"
+          curl -sS -o /dev/null -w 'via-proxy https://pypi.org/simple/ -> %{http_code}\n' \
+            -x "${HTTP_PROXY:-http://squid-cache.squid.svc.cluster.local:3128}" \
+            https://pypi.org/simple/ || echo "::warning::经 squid 访问 pypi 失败（仅信息项）"
+
+      - name: upload probe result
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.task }}
+          path: /tmp/probe-${{ matrix.task }}.txt
+          retention-days: 1
+
+  summary:
+    needs: [fanout]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: summary
+        run: |
+          {
+            echo "### arc-fedsched a2-1980 分配结果（2 卡档 · 宽版 26 单）"
+            echo
+            echo "| task | pod | node | cluster(推断) | pod ip | apiserver | arch | cpus | chips |"
+            echo "|---|---|---|---|---|---|---|---|---|"
+            for f in $(ls artifacts/probe-*/probe-*.txt 2>/dev/null | sort -t- -k2 -n); do
+              task=$(grep '^task=' "$f" | cut -d= -f2)
+              pod=$(grep '^pod=' "$f" | cut -d= -f2-)
+              node=$(grep '^node=' "$f" | cut -d= -f2-)
+              ip=$(grep '^pod_ip=' "$f" | cut -d= -f2-)
+              api=$(grep '^apiserver=' "$f" | cut -d= -f2-)
+              arch=$(grep '^arch=' "$f" | cut -d= -f2-)
+              cpus=$(grep '^cpus=' "$f" | cut -d= -f2-)
+              chips=$(grep -cE '^\| *[0-9]+ +[0-9]{3}[A-Za-z][A-Za-z0-9]* +\|' "$f" || true)
+              case "$node" in
+                172.16.1.*)    cl="ascend-hk-001" ;;
+                192.168.1.*)   cl="wlcb-001" ;;
+                172.16.0.*)    cl="gy-001" ;;
+                ascend910b-*)  cl="karc" ;;
+                *)             cl="?" ;;
+              esac
+              echo "| $task | $pod | $node | $cl | $ip | $api | $arch | $cpus | $chips |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
