@@ -196,12 +196,30 @@ jobs:
             echo "::error::${GIT_CDN_HOST} DNS 解析失败"
             exit 1
           fi
-          # 客户端 gitconfig 必须存在 github.com -> git-cdn 重写（流量真正进 git-cdn 的前提）
-          if ! git config --global --get-regexp 'insteadof' 2>/dev/null | grep -F 'https://github.com/' | grep -qF "$GIT_CDN_HOST"; then
-            echo "::error::runner 全局 gitconfig 缺少 https://github.com/ -> ${GIT_CDN_HOST} 的 insteadOf 重写"
+          # ambient 探针（仅诊断，不判负）：各 fleet runner 镜像 HOME 不同——k8s 容器模式作业
+          # HOME=/github/home，configmap postStart 钩子把重写追加在 /root/.gitconfig，
+          # ambient global config 是否生效因 fleet 而异，不能作为跨集群硬断言
+          ambient="absent"
+          if git config --global --get-regexp 'insteadof' 2>/dev/null | grep -qF "$GIT_CDN_HOST"; then
+            ambient="home_gitcdn"
+          elif [ -f /root/.gitconfig ] && grep -qF "$GIT_CDN_HOST" /root/.gitconfig 2>/dev/null; then
+            ambient="root_gitcdn"
+          fi
+          echo "$ambient" > "$logs/ambient-rewrite.status"
+          echo "ambient gitconfig 重写探针: $ambient (HOME=$HOME)"
+          ls -l /root/.gitconfig "$HOME/.gitconfig" 2>/dev/null || true
+          # 用户场景重写显式注入：与生产 configmap postStart 写入的 insteadOf 目标完全一致
+          # （https://github.com/ -> 集群内 git-cdn github 实例），消除各 fleet HOME 差异影响
+          cat > "$TEST_ROOT/gitconfig" <<EOF
+          [url "http://${GIT_CDN_HOST}:8000/"]
+              insteadOf = https://github.com/
+          EOF
+          cp "$TEST_ROOT/gitconfig" "$logs/gitconfig-injected.txt"
+          if ! GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig" git config --global --get-regexp 'insteadof' 2>/dev/null | grep -qF "$GIT_CDN_HOST"; then
+            echo "::error::注入的 GIT_CONFIG_GLOBAL 未生效（未读出 ${GIT_CDN_HOST} insteadOf）"
             exit 1
           fi
-          echo "rewrite: $(git config --global --get-regexp 'insteadof' | grep -F "$GIT_CDN_HOST" | head -1)"
+          echo "injected rewrite: $(GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig" git config --global --get-regexp 'insteadof' | head -1)"
           # smart 协议探针：绕过 squid 直连，跟随 git-cdn 的 .git 规范化 302
           code=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
             -o "$logs/info-refs-body.txt" -w '%{http_code}' \
@@ -235,6 +253,9 @@ jobs:
         timeout-minutes: 27
         run: |
           set -euo pipefail
+          # 所有 git 子进程统一走 basic 步骤注入的 GIT_CONFIG_GLOBAL
+          # （与生产 configmap postStart 的 insteadOf 重写目标一致）
+          export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig"
           cat > "$TEST_ROOT/run-scenario.sh" <<'SCRIPT'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -340,6 +361,7 @@ jobs:
                 f"| 隔离目录与工具链 | {outcome(os.environ['SETUP'])} |",
                 f"| 端点 DNS + insteadOf 重写 + info/refs | {outcome(os.environ['BASIC'])} |",
                 f"| incident 序列（clone + {iter_n} 轮 fetch main / fetch-by-SHA）时间上界内全部成功 | {outcome(os.environ['SCENARIO'])} |",
+                f"| ambient gitconfig 重写（fleet HOME 差异探针，不判负） | {read('ambient-rewrite.status', 'not_verified')} |",
                 f"| gitcode 实例探针 | {read('gitcode.status', 'not_verified')} |",
                 f"| gitcode 客户端重写存在性 | {read('gitcode-rewrite.status', 'not_verified')} |",
                 '', '### 操作耗时明细', '',

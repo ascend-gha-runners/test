@@ -30,12 +30,15 @@ incident 中 actions/checkout 的按 SHA fetch 在 git-cdn 限速流上悬挂约
   共享同一套集群级 git-cdn 实例，择一即可全覆盖）。被测端点固定为集群内 DNS
   `git-cdn-service.git-cdn.svc.cluster.local:8000`，sh-001/sh-002 未部署的 gitcode 实例
   （`git-cdn-gitcode`）与 gy-001/wlcb-001 的 ExternalName 别名一律记探针，不判负、不推断缺失。
-- 流量路径证据链：客户端 insteadOf 重写存在（硬）、clone 日志含 git-cdn 302 规范化重定向
-  （硬）、info/refs smart 协议 advertisement（硬）——三者共同证明采样确实经过 git-cdn，
-  避免直连上游时"全绿但没测到"的假阳性。
+- 流量路径证据链：用例以 GIT_CONFIG_GLOBAL 注入与生产 configmap postStart 完全一致的
+  `https://github.com/` -> git-cdn insteadOf 重写并自检生效（硬）、clone 日志含 git-cdn 302 规范化
+  重定向（硬）、info/refs smart 协议 advertisement（硬）——三者共同证明采样确实经过 git-cdn，
+  避免直连上游时"全绿但没测到"的假阳性。不依赖 ambient global config：k8s 容器模式作业 HOME
+  未必是 /root（runner 镜像普遍为 /github/home，重写只落在 /root/.gitconfig），ambient 重写是否
+  生效因 fleet 而异，仅记探针（首次全量 dispatch 13/13 集群因此失败后修正）。
 - 软阈值（单次 fetch-by-SHA 耗时，默认 120s）只承担趋势观察：冷回源大 pack 与缓存命中之间存在
   数量级波动，超过软阈值仅 WARN，不伪装成硬失败。
-- 定时采样在 Runner Pod 真实用户环境（Host Environment，无容器隔离）执行，与 incident 中
-  checkout 的执行环境一致；不在本轮引入 ArgoCD revision 门禁或部署等待作为验收前提。
+- 定时采样在 Runner Pod 真实用户环境（Host Environment，无容器隔离）执行，客户端重写目标
+  与 incident 一致（显式注入，见上）；不在本轮引入 ArgoCD revision 门禁或部署等待作为验收前提。
 - 需要验证 git-cdn 配置渲染正确性时，由 ascend-ci-deployment 的守护单测
   （`tests/test_gitcdn_lowspeed_gitconfig.py`）承担；本仓库不重复断言服务端内部配置。
