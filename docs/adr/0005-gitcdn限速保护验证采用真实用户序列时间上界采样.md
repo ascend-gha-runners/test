@@ -32,10 +32,12 @@ incident 中 actions/checkout 的按 SHA fetch 在 git-cdn 限速流上悬挂约
   （`git-cdn-gitcode`）与 gy-001/wlcb-001 的 ExternalName 别名一律记探针，不判负、不推断缺失。
 - 流量路径证据链：用例以 GIT_CONFIG_GLOBAL 注入与生产 configmap postStart 完全一致的
   `https://github.com/` -> git-cdn insteadOf 重写并自检生效（硬）、clone 日志含 git-cdn 302 规范化
-  重定向（硬）、info/refs smart 协议 advertisement（硬）——三者共同证明采样确实经过 git-cdn，
-  避免直连上游时"全绿但没测到"的假阳性。不依赖 ambient global config：k8s 容器模式作业 HOME
-  未必是 /root（runner 镜像普遍为 /github/home，重写只落在 /root/.gitconfig），ambient 重写是否
-  生效因 fleet 而异，仅记探针（首次全量 dispatch 13/13 集群因此失败后修正）。
+  重定向（硬）、git ls-remote 经 git-cdn 返回 refs advertisement（硬）——三者共同证明采样确实
+  经过 git-cdn，避免直连上游时"全绿但没测到"的假阳性。不依赖 ambient global config：k8s 容器
+  模式作业 HOME 未必是 /root（runner 镜像普遍为 /home/runner，重写只落在 /root/.gitconfig），
+  ambient 重写是否生效因 fleet 而异，仅记探针。协议级连通不用 curl 探针：git-cdn 302 规范化丢
+  query string，curl -L 跟随后退化为 dumb 协议被上游 403，与真 git 客户端行为不同（实测两轮
+  dispatch 均如此），一律以真实 git 客户端验证。
 - 软阈值（单次 fetch-by-SHA 耗时，默认 120s）只承担趋势观察：冷回源大 pack 与缓存命中之间存在
   数量级波动，超过软阈值仅 WARN，不伪装成硬失败。
 - 定时采样以 CANN 容器（root / HOME=/root，与 vllm-ascend CI 同款镜像）在 Runner Pod 内执行：

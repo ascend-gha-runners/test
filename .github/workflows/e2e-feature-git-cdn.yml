@@ -158,7 +158,7 @@ jobs:
         timeout-minutes: 1
         run: |
           set -euo pipefail
-          for cmd in git curl timeout python3 getent awk; do
+          for cmd in git timeout python3 getent awk; do
             command -v "$cmd" >/dev/null || { echo "::error::缺少工具 $cmd"; exit 1; }
           done
           git --version; timeout --version | head -1
@@ -195,8 +195,6 @@ jobs:
             https://github.com/*) : ;;
             *) echo "::error::REPO_URL 仅支持 https://github.com/ 前缀（insteadOf 重写只覆盖 github.com）"; exit 1 ;;
           esac
-          repo_path=$(python3 -c 'from urllib.parse import urlparse; import os; print(urlparse(os.environ["REPO_URL"]).path.strip("/"))')
-          echo "REPO_PATH=$repo_path" >> "$GITHUB_ENV"
           # github 实例 DNS（硬断言：集群内 git-cdn 必须可解析）
           if ! getent hosts "$GIT_CDN_HOST" >/dev/null; then
             echo "::error::${GIT_CDN_HOST} DNS 解析失败"
@@ -227,26 +225,16 @@ jobs:
             exit 1
           fi
           echo "injected rewrite: $(GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig" git config --global --get-regexp 'insteadof' | head -1)"
-          # smart 协议探针：绕过 squid 直连，跟随 git-cdn 的 .git 规范化 302
-          code=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
-            -o "$logs/info-refs-body.txt" -w '%{http_code}' \
-            "http://${GIT_CDN_HOST}:8000/${repo_path}.git/info/refs?service=git-upload-pack") || code=unreachable
-          if [ "$code" = 200 ] && grep -q '# service=git-upload-pack' "$logs/info-refs-body.txt"; then
-            echo "pass" > "$logs/info-refs.status"
-          else
-            echo "::error::git-cdn info/refs 探针异常: code=$code"
-            exit 1
-          fi
-          # gitcode 实例仅探针不判负：sh-001/sh-002 未部署实例（DNS 不存在），
+          # 协议级连通不再用 curl 探针：git-cdn 的 302 规范化会丢 query string，curl -L
+          # 跟随后退化为 dumb 协议被上游 403（"Please upgrade your git client"），与真
+          # git 客户端行为不同。连通验证由场景步骤首操作 00-lsremote（真实 git 客户端）承担
+          # gitcode 实例仅 DNS 探针不判负：sh-001/sh-002 未部署实例（DNS 不存在），
           # gy-001/wlcb-001 的 DNS 是指向 git-cache 的 ExternalName 别名，语义不同
           if ! getent hosts "$GIT_CDN_GITCODE_HOST" >/dev/null; then
             echo "not_applicable" > "$logs/gitcode.status"
             echo "该集群无 gitcode 实例 DNS，记 not_applicable"
           else
-            gcode=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
-              -o /dev/null -w '%{http_code}' \
-              "http://${GIT_CDN_GITCODE_HOST}:8000/${repo_path}.git/info/refs?service=git-upload-pack") || gcode=unreachable
-            echo "gitcode_instance=${gcode}" > "$logs/gitcode.status"
+            echo "resolved" > "$logs/gitcode.status"
           fi
           # 客户端 gitcode 重写存在性（sh-001/sh-002 的 configmap 无此配置，仅记录）
           if git config --global --get-regexp 'insteadof' 2>/dev/null | grep -F "$GIT_CDN_GITCODE_HOST" | grep -qF 'https://gitcode'; then
@@ -366,7 +354,7 @@ jobs:
           md = ['## git-cdn 回源限速保护 E2E（TC-FEAT-GITCDN）', '',
                 '| 检查 | 结果 |', '|---|---|',
                 f"| 隔离目录与工具链 | {outcome(os.environ['SETUP'])} |",
-                f"| 端点 DNS + insteadOf 重写 + info/refs | {outcome(os.environ['BASIC'])} |",
+                f"| 端点 DNS + insteadOf 重写注入自检 | {outcome(os.environ['BASIC'])} |",
                 f"| incident 序列（clone + {iter_n} 轮 fetch main / fetch-by-SHA）时间上界内全部成功 | {outcome(os.environ['SCENARIO'])} |",
                 f"| ambient gitconfig 重写（fleet HOME 差异探针，不判负） | {read('ambient-rewrite.status', 'not_verified')} |",
                 f"| gitcode 实例探针 | {read('gitcode.status', 'not_verified')} |",
