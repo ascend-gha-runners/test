@@ -156,6 +156,34 @@
       }
     },
     {
+      "id": "TC-FEAT-GITCDN",
+      "name": "git-cdn 回源限速保护与快失败（fetch 悬挂治理）",
+      "category": "platform-feature",
+      "feature_doc": "https://github.com/opensourceways/backlog/issues/2885",
+      "service_port": 8000,
+      "client": ["git"],
+      "workflow": ".github/workflows/e2e-feature-git-cdn.yml",
+      "engine_scenario": "git_cdn",
+      "default_container": null,
+      "target_clusters": "all",
+      "assertions": {
+        "hard": [
+          "用例注入与生产 configmap 一致的 https://github.com/ -> git-cdn insteadOf 重写（GIT_CONFIG_GLOBAL）并自检生效，clone 日志含 git-cdn 302 重定向证据",
+          "git-cdn smart 协议 info/refs 探针 200 且返回 upload-pack advertisement",
+          "incident 复现序列（全量 clone + 每轮 ls-remote / fetch main / fetch-by-SHA）全部在时间上界内 exit 0，无超时强杀",
+          "git 输出无限速故障签名（Could not resolve HEAD / remote end hung up / early EOF / RPC failed / HTTP 4xx-5xx / index-pack failed）"
+        ],
+        "soft": [
+          "单次 fetch-by-SHA 最坏耗时低于软阈值（超过记 WARN 不判负）"
+        ],
+        "probe": [
+          "ambient gitconfig 重写存在性探针（各 fleet HOME=/root 与 /github/home 差异，不判负）",
+          "gitcode 实例 DNS / info-refs 探针（未部署集群记 not_applicable）",
+          "gitcode 客户端重写存在性探针"
+        ]
+      }
+    },
+    {
       "id": "TC-SCHED-DUAL-LABEL",
       "name": "全 13 集群 Runner [型号, 区域] 双标签调度与芯片识别",
       "category": "runner-scheduling",

@@ -43,6 +43,7 @@ flowchart TD
 | [`TC-FEAT-YUM`](#tc-feat-yum) | openEuler YUM / DNF 缓存 | [YUM Cache (Port 8083)](https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083) | 8083 (HTTP) | `dnf`, `yum` | `e2e-feature-yum-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-GO`](#tc-feat-go) | Go modules 下载与运行 | [Go Cache (Port 8084)](https://ascend-gha-runners.github.io/docs/feature/) | 8084 (HTTP) | `go` | `e2e-feature-go-cache.yml` | golang:1.23-bookworm |
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
+| [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | Host Environment（Runner Pod 自带 git） |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
 
@@ -274,6 +275,52 @@ cargo build
 - **探针**：`X-Cache-Tier: rsproxy`；
 - **异常与容灾断言**：虚构 crate 使用带版本的合法下载路径，精确读取 HTTP 403/404 并独立记录回源层级；清除 target 后通过 `cargo build --offline --locked` 从已下载 registry 重新构建并运行，不能复用旧二进制伪装通过。
 - **探针**：上游 USTC 返回 403 Access Denied 时，官方 crates-official 优雅回退兜底（PR #1722 能力）。
+
+---
+
+### TC-FEAT-GITCDN
+
+#### 1. 基本信息
+- **用例 ID**：`TC-FEAT-GITCDN`
+- **名称**：git-cdn 回源限速保护与快失败（fetch 悬挂治理，Port 8000）
+- **官方文档**：[backlog#2885 git-cdn 加限速识别，快失败重试](https://github.com/opensourceways/backlog/issues/2885)
+- **关联工作流**：`.github/workflows/e2e-feature-git-cdn.yml`
+- **执行范围**：全部 13 集群（runners.json 每集群择一 Runner，优先 CPU；同集群 cpu/npu 共享同一套集群级 git-cdn 实例）
+- **默认执行镜像**：Host Environment（Runner Pod 自带 git，真实用户环境，不做容器隔离）
+- **修复基线**：ascend-ci-deployment `422793a8c`（git-cdn 回源 gitconfig 注入 `http.lowSpeedLimit=1MiB/s` / `http.lowSpeedTime=60`，限速流快失败并交给 backoff 重试，全部集群生效）
+
+#### 2. 测试目的
+1. 复现并持续采样 incident 场景（vllm-project/vllm-ascend run 41602861604：按 SHA fetch 在 git-cdn 限速流上悬挂约 4 小时后以 `fatal: Could not resolve HEAD to a revision` 失败）；
+2. 以"时间上界 + 故障签名"硬断言验证 git 操作不再出现小时级悬挂，限速被 git-cdn 侧识别并快失败重试；
+3. 验证 runner 到 git-cdn 的流量路径真实成立（客户端 insteadOf 重写 + git-cdn 302 规范化重定向证据 + smart 协议探针）；
+4. 由定时采样（每天 4 个时段 × 13 集群）在看板长期累积，验证"随机限速故障率下降（接近 0）"的完成标准。
+
+#### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend CI）
+```bash
+# 生产各 fleet 的重写来源：job pod template 的 lifecycle.postStart 钩子向 /root/.gitconfig 追加：
+# [url "http://git-cdn-service.git-cdn.svc.cluster.local:8000/"]
+#     insteadOf = https://github.com/
+# 注意：k8s 容器模式作业的 HOME 未必是 /root（部分 fleet 为 /github/home），
+# ambient global config 是否生效因 fleet 而异。用例不依赖 ambient 环境，
+# 以 GIT_CONFIG_GLOBAL 注入与生产完全一致的 [url ...] insteadOf 重写后代入：
+export GIT_CONFIG_GLOBAL="$PWD/gitconfig"
+cat > "$GIT_CONFIG_GLOBAL" <<EOF
+[url "http://git-cdn-service.git-cdn.svc.cluster.local:8000/"]
+    insteadOf = https://github.com/
+EOF
+# 以下即 incident 中 actions/checkout 的实际操作形态：
+git ls-remote https://github.com/vllm-project/vllm-ascend refs/heads/main
+git clone --no-checkout https://github.com/vllm-project/vllm-ascend repo   # 对标 fetch-depth: 0
+SHA=$(git ls-remote https://github.com/vllm-project/vllm-ascend refs/heads/main | awk '{print $1}')
+git -C repo fetch --no-tags origin main
+git -C repo fetch --no-tags origin "$SHA"   # incident 中悬挂 4h 的 fetch-by-SHA
+```
+
+#### 4. 判定标准
+- **硬断言**：注入的 GIT_CONFIG_GLOBAL 重写自检生效（`https://github.com/` -> git-cdn，与生产 configmap postStart 写入目标一致），clone 日志含 git-cdn 302 重定向证据；info/refs 探针 200 且返回 upload-pack advertisement；incident 复现序列（全量 clone + 每轮 ls-remote / fetch main / fetch-by-SHA）全部在时间上界内 `exit 0`，无 `timeout` 强杀（exit 124）；git 输出无限速故障签名（`Could not resolve HEAD to a revision` / `remote end hung up` / `early EOF` / `RPC failed` / HTTP 4xx-5xx / `index-pack failed`）；
+- **软断言**：单次 fetch-by-SHA 最坏耗时低于软阈值（默认 120s，超过仅 WARN 记录趋势，不判负——冷回源大 pack 属正常波动）；
+- **探针**：ambient gitconfig 重写存在性（HOME 与 /root 两侧分别记录，反映 fleet 差异，不判负）；gitcode 实例（`git-cdn-gitcode`）DNS 与 info-refs 探针——sh-001/sh-002 未部署实例记 `not_applicable`，gy-001/wlcb-001 为 ExternalName 别名，均不判负；客户端 gitcode 重写存在性仅记录；
+- **统计口径**：单次运行全绿不能单独证明限速修复生效（限速是低概率随机事件）；该用例按"定时采样 × 多轮迭代"设计，故障率统计由看板（update-report-pages）跨运行聚合，结论以长期趋势为准。
 
 ---
 
