@@ -8,3 +8,4 @@
 | [0002](0002-pytorch-cpu用例仅限amd64架构测试并在arm64优雅跳过.md) | PyTorch CPU 用例仅限 amd64 架构测试并在 arm64 优雅跳过 | 已接受 | 2026-09-26 | [#23](https://github.com/ascend-gha-runners/test/pull/23) |
 | [0003](0003-基于agentic-workflow实现issue驱动的e2e用例自闭环开发与验证.md) | 基于 Agentic Workflow 实现 Issue 驱动的 E2E 用例自闭环开发与验证 | 已接受 | 2026-09-28 | [#23](https://github.com/ascend-gha-runners/test/pull/23) |
 | [0004](0004-用户面冷缓存下载与文件完整性抽样.md) | 用户面冷缓存下载与文件完整性抽样 | 提议中 | 待评审 | 待创建 |
+| [0005](0005-gitcdn限速保护验证采用真实用户序列时间上界采样.md) | git-cdn 限速保护验证采用真实用户序列时间上界采样 | 提议中 | 待评审 | 待创建 |

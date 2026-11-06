@@ -1,0 +1,384 @@
+name: e2e-feature-git-cdn
+# git-cdn 回源限速保护（http.lowSpeed*）端到端验证 — opensourceways/backlog#2885
+#
+# 对标故障：vllm-project/vllm-ascend run 41602861604（job 125815083659）中，
+# actions/checkout 的按 SHA fetch 在 git-cdn 限速流上悬挂约 4 小时（08:51 -> 12:51），
+# 最终以 "fatal: Could not resolve HEAD to a revision" 失败整个 job。
+# 修复（ascend-ci-deployment@422793a8c）：git-cdn 回源 gitconfig 注入
+# lowSpeedLimit=1MiB/s / lowSpeedTime=60，限速流持续 60s 即快失败并交给
+# repo_cache 的 backoff 重试，最坏耗时从小时级降到分钟级，全部集群生效。
+#
+# 验证方式（ADR-0005）：不向生产 git-cdn / 上游做故障注入，在全部集群用真实
+# 用户 git 序列（ls-remote / 全量 clone / fetch main / fetch-by-SHA）重复采样，
+# 以"时间上界 + 故障签名"作硬断言判定不再出现小时级悬挂；随机限速的故障率
+# 由定时采样与看板（update-report-pages）长期统计收敛。
+
+on:
+  schedule:
+    # 每天 UTC 1/7/13/19 点（北京 09/15/21/03 点），覆盖业务高峰与夜间时段采样
+    - cron: "0 1,7,13,19 * * *"
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all = 13 集群全覆盖 / 单集群名)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      iterations:
+        description: "fetch-by-SHA 采样轮次 (1-10，默认 3)"
+        required: false
+        default: "3"
+        type: string
+      op_timeout_seconds:
+        description: "单次 fetch/ls-remote 时间上界秒数 (60-1200，默认 300)"
+        required: false
+        default: "300"
+        type: string
+      clone_timeout_seconds:
+        description: "全量 clone 时间上界秒数 (120-1500，默认 600)"
+        required: false
+        default: "600"
+        type: string
+      repo_url:
+        description: "被测仓库（仅支持 https://github.com/ 前缀，insteadOf 重写只覆盖 github.com）"
+        required: false
+        default: "https://github.com/vllm-project/vllm-ascend"
+        type: string
+      branch:
+        description: "被测分支"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GIT_CDN_HOST: git-cdn-service.git-cdn.svc.cluster.local
+  GIT_CDN_GITCODE_HOST: git-cdn-service.git-cdn-gitcode.svc.cluster.local
+  # Schedule 触发时 inputs 渲染为空，统一走 || 默认值（避坑基线 #4）
+  REPO_URL: ${{ inputs.repo_url || 'https://github.com/vllm-project/vllm-ascend' }}
+  BRANCH: ${{ inputs.branch || 'main' }}
+  # git 限速/传输故障签名（含 incident 实际出现的 "Could not resolve HEAD to a revision"）
+  GIT_FAIL_SIG: 'fatal: Could not resolve HEAD to a revision|the remote end hung up|early EOF|RPC failed|curl: \(28\)|returned error: [45][0-9][0-9]|index-pack failed|expected flush packet|bad pack file'
+
+jobs:
+  matrix-setup:
+    name: 解析 git-cdn 集群矩阵
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json（每集群择一 Runner，优先 CPU）
+        id: set-matrix
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open('.github/config/runners.json') as fp:
+              runners = json.load(fp)['runners']
+          target = "${{ inputs.cluster || 'all' }}".strip()
+
+          # 覆盖判定：runners.json 登记的每个集群都必须有被测 Runner。
+          # 同集群 cpu/npu 共享同一套集群级 git-cdn 实例，每集群择一即可全覆盖。
+          by_cluster = {}
+          for r in runners:
+              by_cluster.setdefault(r['cluster'], []).append(r)
+
+          clusters = sorted(by_cluster) if target == 'all' else [target]
+          unknown = [c for c in clusters if c not in by_cluster]
+          if unknown:
+              raise SystemExit(f'runners.json 中不存在集群: {unknown}；不得编造标签')
+
+          selected = []
+          for c in clusters:
+              cands = sorted(by_cluster[c], key=lambda r: (r.get('type') != 'cpu', r['name']))
+              r = cands[0]
+              labels = r['labels']
+              if len(labels) != 2 or c not in labels:
+                  raise SystemExit(f'{c} 双标签异常: {labels}')
+              selected.append(r)
+              print(f'{c}: {r["name"]} labels={labels}')
+
+          matrix = json.dumps({'include': selected}, separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fp:
+              fp.write(f'matrix={matrix}\n')
+              fp.write(f'count={len(selected)}\n')
+          PY
+
+  git-cdn-probe:
+    name: "git-cdn ${{ matrix.cluster }} / ${{ matrix.name }}"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    # 工作流级硬上界：修复前该场景会悬挂小时级，这里保证作业本身永不悬挂
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CLUSTER_NAME: ${{ matrix.cluster }}
+      ITERATIONS: ${{ inputs.iterations || '3' }}
+      OP_TIMEOUT: ${{ inputs.op_timeout_seconds || '300' }}
+      CLONE_TIMEOUT: ${{ inputs.clone_timeout_seconds || '600' }}
+      LSREMOTE_TIMEOUT: "60"
+      SOFT_WARN_SECONDS: "120"
+    steps:
+      - name: 建立隔离测试目录与参数钳制
+        id: setup
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          for cmd in git curl timeout python3 getent awk; do
+            command -v "$cmd" >/dev/null || { echo "::error::缺少工具 $cmd"; exit 1; }
+          done
+          git --version; timeout --version | head -1
+          # 临时目录按 run+attempt 唯一（避坑基线 #2），放 RUNNER_TEMP 不入共享 SFS
+          root="$RUNNER_TEMP/git-cdn-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root/logs" "$root/work"
+          echo "TEST_ROOT=$root" >> "$GITHUB_ENV"
+          # 人工输入钳制，防止误填把作业拖过 30 分钟工作流上界
+          python3 - <<'PY'
+          import os
+
+          def clamp(name, default, lo, hi):
+              try:
+                  v = int(os.environ.get(name, ''))
+              except ValueError:
+                  v = default
+              v = max(lo, min(hi, v))
+              with open(os.environ['GITHUB_ENV'], 'a') as fp:
+                  fp.write(f'{name}={v}\n')
+
+          clamp('ITERATIONS', 3, 1, 10)
+          clamp('OP_TIMEOUT', 300, 60, 1200)
+          clamp('CLONE_TIMEOUT', 600, 120, 1500)
+          PY
+
+      - name: 【基础功能】git-cdn 端点与客户端重写检查
+        id: basic
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          logs="$TEST_ROOT/logs"
+          echo "REPO_URL=$REPO_URL BRANCH=$BRANCH ITERATIONS=$ITERATIONS OP_TIMEOUT=$OP_TIMEOUT CLONE_TIMEOUT=$CLONE_TIMEOUT"
+          case "$REPO_URL" in
+            https://github.com/*) : ;;
+            *) echo "::error::REPO_URL 仅支持 https://github.com/ 前缀（insteadOf 重写只覆盖 github.com）"; exit 1 ;;
+          esac
+          repo_path=$(python3 -c 'from urllib.parse import urlparse; import os; print(urlparse(os.environ["REPO_URL"]).path.strip("/"))')
+          echo "REPO_PATH=$repo_path" >> "$GITHUB_ENV"
+          # github 实例 DNS（硬断言：集群内 git-cdn 必须可解析）
+          if ! getent hosts "$GIT_CDN_HOST" >/dev/null; then
+            echo "::error::${GIT_CDN_HOST} DNS 解析失败"
+            exit 1
+          fi
+          # 客户端 gitconfig 必须存在 github.com -> git-cdn 重写（流量真正进 git-cdn 的前提）
+          if ! git config --global --get-regexp 'insteadof' 2>/dev/null | grep -F 'https://github.com/' | grep -qF "$GIT_CDN_HOST"; then
+            echo "::error::runner 全局 gitconfig 缺少 https://github.com/ -> ${GIT_CDN_HOST} 的 insteadOf 重写"
+            exit 1
+          fi
+          echo "rewrite: $(git config --global --get-regexp 'insteadof' | grep -F "$GIT_CDN_HOST" | head -1)"
+          # smart 协议探针：绕过 squid 直连，跟随 git-cdn 的 .git 规范化 302
+          code=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
+            -o "$logs/info-refs-body.txt" -w '%{http_code}' \
+            "http://${GIT_CDN_HOST}:8000/${repo_path}/info/refs?service=git-upload-pack") || code=unreachable
+          if [ "$code" = 200 ] && grep -q '# service=git-upload-pack' "$logs/info-refs-body.txt"; then
+            echo "pass" > "$logs/info-refs.status"
+          else
+            echo "::error::git-cdn info/refs 探针异常: code=$code"
+            exit 1
+          fi
+          # gitcode 实例仅探针不判负：sh-001/sh-002 未部署实例（DNS 不存在），
+          # gy-001/wlcb-001 的 DNS 是指向 git-cache 的 ExternalName 别名，语义不同
+          if ! getent hosts "$GIT_CDN_GITCODE_HOST" >/dev/null; then
+            echo "not_applicable" > "$logs/gitcode.status"
+            echo "该集群无 gitcode 实例 DNS，记 not_applicable"
+          else
+            gcode=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
+              -o /dev/null -w '%{http_code}' \
+              "http://${GIT_CDN_GITCODE_HOST}:8000/${repo_path}/info/refs?service=git-upload-pack") || gcode=unreachable
+            echo "gitcode_instance=${gcode}" > "$logs/gitcode.status"
+          fi
+          # 客户端 gitcode 重写存在性（sh-001/sh-002 的 configmap 无此配置，仅记录）
+          if git config --global --get-regexp 'insteadof' 2>/dev/null | grep -F "$GIT_CDN_GITCODE_HOST" | grep -qF 'https://gitcode'; then
+            echo "present" > "$logs/gitcode-rewrite.status"
+          else
+            echo "absent" > "$logs/gitcode-rewrite.status"
+          fi
+
+      - name: 【用户视角场景】incident 复现：全量 clone + fetch-by-SHA 采样
+        id: scenario
+        timeout-minutes: 27
+        run: |
+          set -euo pipefail
+          cat > "$TEST_ROOT/run-scenario.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          work="$TEST_ROOT/work"
+          logs="$TEST_ROOT/logs"
+          ops="$logs/ops.tsv"
+          : > "$ops"
+          FAIL=0
+
+          run_op() {
+            local label="$1" tmo="$2"; shift 2
+            local f="$logs/${label}.log" rc=0 t0 t1 sig=""
+            t0=$(date +%s)
+            timeout "$tmo" "$@" >"$f" 2>&1 || rc=$?
+            t1=$(date +%s)
+            if grep -Eq "$GIT_FAIL_SIG" "$f"; then sig="rate_limit_signature"; fi
+            printf '%s\t%s\t%s\t%s\n' "$label" "$((t1 - t0))" "$rc" "$sig" >> "$ops"
+            if [ "$rc" -eq 124 ]; then
+              echo "::error::[$label] 超过 ${tmo}s 上界被强杀——限速悬挂特征（修复前该形态悬挂小时级）"
+              FAIL=1
+            elif [ "$rc" -ne 0 ]; then
+              echo "::error::[$label] exit=$rc，日志尾部: $(tail -n 5 "$f" | tr '\n\t' '  ')"
+              FAIL=1
+            elif [ -n "$sig" ]; then
+              echo "::error::[$label] exit=0 但输出命中限速故障签名"
+              FAIL=1
+            fi
+            return 0
+          }
+
+          # 0) 预检：ls-remote 经 git-cdn 可达（git 协议级连通证明）
+          run_op "00-lsremote" "$LSREMOTE_TIMEOUT" git ls-remote "$REPO_URL" "refs/heads/$BRANCH"
+          # 1) 全量引用拉取（对标 incident 中 actions/checkout fetch-depth: 0 的全量 fetch）
+          run_op "01-clone-full" "$CLONE_TIMEOUT" git clone --no-checkout "$REPO_URL" "$work/repo"
+          # 重定向证据：clone 日志必须出现 git-cdn 302，与 incident 日志中的
+          # "warning: redirecting to http://git-cdn-service..." 一致，证明流量确实走 git-cdn
+          if ! grep -F "redirecting to http://${GIT_CDN_HOST}" "$logs/01-clone-full.log" >/dev/null; then
+            echo "::error::clone 日志缺少 git-cdn 重定向证据，无法证明流量经过 git-cdn"
+            FAIL=1
+          fi
+          # 2) 迭代采样：每轮取最新分支 SHA 再按 SHA fetch——incident 中悬挂 4h 的操作形态。
+          #    最新 SHA 大概率不在 git-cdn pack 缓存内，会触发回源，即被测限速保护路径
+          for i in $(seq 1 "$ITERATIONS"); do
+            run_op "i${i}-lsremote" "$LSREMOTE_TIMEOUT" git ls-remote "$REPO_URL" "refs/heads/$BRANCH"
+            sha=$(awk 'NR==1 {print $1}' "$logs/i${i}-lsremote.log")
+            if [ -z "$sha" ]; then
+              echo "::error::[i${i}] ls-remote 未解析到 $BRANCH 的 SHA"
+              FAIL=1
+              continue
+            fi
+            run_op "i${i}-fetch-main" "$OP_TIMEOUT" git -C "$work/repo" fetch --no-tags origin "$BRANCH"
+            run_op "i${i}-fetch-sha" "$OP_TIMEOUT" git -C "$work/repo" fetch --no-tags origin "$sha"
+          done
+
+          if [ "$FAIL" -ne 0 ]; then
+            exit 1
+          fi
+          echo "scenario 全部 ${ITERATIONS} 轮采样通过（每操作均在时间上界内 exit 0 且无限速签名）"
+          SCRIPT
+          bash "$TEST_ROOT/run-scenario.sh"
+
+      - name: Always report pass / fail / not_applicable
+        id: report
+        if: always()
+        env:
+          SETUP: ${{ steps.setup.outcome }}
+          BASIC: ${{ steps.basic.outcome }}
+          SCENARIO: ${{ steps.scenario.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          root = os.environ.get('TEST_ROOT', '')
+          logs = os.path.join(root, 'logs') if root else ''
+
+          def read(name, default):
+              try:
+                  return open(os.path.join(logs, name)).read().strip()
+              except OSError:
+                  return default
+
+          def outcome(v):
+              return {'success': 'pass', 'failure': 'fail'}.get(v, 'not_verified')
+
+          ops = []
+          ops_path = os.path.join(logs, 'ops.tsv')
+          if os.path.exists(ops_path):
+              for line in open(ops_path):
+                  parts = line.rstrip('\n').split('\t')
+                  if len(parts) == 4:
+                      ops.append(parts)
+
+          fetch_durs = [int(d) for label, d, rc, sig in ops
+                        if 'fetch-sha' in label and rc == '0' and not sig]
+          max_fetch = max(fetch_durs) if fetch_durs else 0
+          soft_warn = int(os.environ.get('SOFT_WARN_SECONDS', '120'))
+          iter_n = os.environ.get('ITERATIONS', '3')
+
+          md = ['## git-cdn 回源限速保护 E2E（TC-FEAT-GITCDN）', '',
+                '| 检查 | 结果 |', '|---|---|',
+                f"| 隔离目录与工具链 | {outcome(os.environ['SETUP'])} |",
+                f"| 端点 DNS + insteadOf 重写 + info/refs | {outcome(os.environ['BASIC'])} |",
+                f"| incident 序列（clone + {iter_n} 轮 fetch main / fetch-by-SHA）时间上界内全部成功 | {outcome(os.environ['SCENARIO'])} |",
+                f"| gitcode 实例探针 | {read('gitcode.status', 'not_verified')} |",
+                f"| gitcode 客户端重写存在性 | {read('gitcode-rewrite.status', 'not_verified')} |",
+                '', '### 操作耗时明细', '',
+                '| 操作 | 耗时s | exit | 限速签名 |', '|---|---|---|---|']
+          for label, dur, rc, sig in ops:
+              md.append(f'| {label} | {dur} | {rc} | {sig or "-"} |')
+          md.append('')
+          md.append(f'最坏 fetch-by-SHA 耗时: **{max_fetch}s**（软阈值 {soft_warn}s，'
+                    '超出仅 WARN；incident 基线为小时级悬挂）')
+
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as fp:
+                  fp.write('\n'.join(md) + '\n')
+
+          result = {
+              'cluster': os.environ.get('CLUSTER_NAME', ''),
+              'runner': os.environ.get('RUNNER_NAME', ''),
+              'iterations': iter_n,
+              'ops': [{'op': l, 'seconds': int(d), 'exit': int(rc), 'signature': s}
+                      for l, d, rc, s in ops],
+              'max_fetch_by_sha_seconds': max_fetch,
+              'basic': outcome(os.environ['BASIC']),
+              'scenario': outcome(os.environ['SCENARIO']),
+          }
+          cluster = os.environ.get('CLUSTER_NAME') or 'unknown'
+          with open(os.path.join(logs, f'gitcdn_report_{cluster}.json'), 'w') as fp:
+              json.dump(result, fp, ensure_ascii=False, indent=2)
+
+          if fetch_durs and max_fetch > soft_warn:
+              print(f'::warning::fetch-by-SHA 最坏耗时 {max_fetch}s 超过软阈值 {soft_warn}s'
+                    '（形态接近限速悬挂，请结合多轮运行关注趋势）')
+          PY
+
+      - name: Upload diagnostic logs (including failures)
+        if: ${{ always() && env.TEST_ROOT != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-cdn-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ env.TEST_ROOT }}/logs/
+          retention-days: 7
+          if-no-files-found: warn
