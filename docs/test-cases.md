@@ -317,9 +317,9 @@ git -C repo fetch --no-tags origin "$SHA"   # incident 中悬挂 4h 的 fetch-by
 ```
 
 #### 4. 判定标准
-- **硬断言**：注入的 GIT_CONFIG_GLOBAL 重写自检生效（`https://github.com/` -> git-cdn，与生产 configmap postStart 写入目标一致），clone 日志含 git-cdn 302 重定向证据；info/refs 探针 200 且返回 upload-pack advertisement；incident 复现序列（全量 clone + 每轮 ls-remote / fetch main / fetch-by-SHA）全部在时间上界内 `exit 0`，无 `timeout` 强杀（exit 124）；git 输出无限速故障签名（`Could not resolve HEAD to a revision` / `remote end hung up` / `early EOF` / `RPC failed` / HTTP 4xx-5xx / `index-pack failed`）；
+- **硬断言**：注入的 GIT_CONFIG_GLOBAL 重写自检生效（`https://github.com/` -> git-cdn，与生产 configmap postStart 写入目标一致），clone 日志含 git-cdn 302 重定向证据；git ls-remote 经 git-cdn 真实客户端成功返回 refs advertisement（协议级连通；curl 类探针会因 git-cdn 302 丢 query 触发上游 dumb-http 403，不采用）；incident 复现序列（全量 clone + 每轮 ls-remote / fetch main / fetch-by-SHA）全部在时间上界内 `exit 0`，无 `timeout` 强杀（exit 124）；git 输出无限速故障签名（`Could not resolve HEAD to a revision` / `remote end hung up` / `early EOF` / `RPC failed` / HTTP 4xx-5xx / `index-pack failed`）；
 - **软断言**：单次 fetch-by-SHA 最坏耗时低于软阈值（默认 120s，超过仅 WARN 记录趋势，不判负——冷回源大 pack 属正常波动）；
-- **探针**：ambient gitconfig 重写存在性（HOME 与 /root 两侧分别记录，反映 fleet 差异，不判负）；gitcode 实例（`git-cdn-gitcode`）DNS 与 info-refs 探针——sh-001/sh-002 未部署实例记 `not_applicable`，gy-001/wlcb-001 为 ExternalName 别名，均不判负；客户端 gitcode 重写存在性仅记录；
+- **探针**：ambient gitconfig 重写存在性（HOME 与 /root 两侧分别记录，反映 fleet 差异，不判负）；gitcode 实例（`git-cdn-gitcode`）DNS 探针——sh-001/sh-002 未部署实例记 `not_applicable`，gy-001/wlcb-001 为 ExternalName 别名，均不判负；客户端 gitcode 重写存在性仅记录；
 - **统计口径**：单次运行全绿不能单独证明限速修复生效（限速是低概率随机事件）；该用例按"定时采样 × 多轮迭代"设计，故障率统计由看板（update-report-pages）跨运行聚合，结论以长期趋势为准。
 
 ---
