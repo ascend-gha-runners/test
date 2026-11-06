@@ -1,0 +1,407 @@
+name: e2e-feature-git-lowspeed
+# git http.lowSpeed* 传输自保护机制语义验证（受控限速上游，实验室 fixture）— backlog#2885
+#
+# 背景：git-cdn 回源限速保护（ascend-ci-deployment 422793a8c，ADR-0005）依赖回源
+# git 子进程的 http.lowSpeedLimit/lowSpeedTime：低于阈值持续 lowSpeedTime 秒即中止，
+# 交给 repo_cache 的 backoff 重试，最坏耗时从小时级降到分钟级。
+#
+# 本用例用自建限速 HTTP 服务（dumb 协议静态服务，仅绑定 127.0.0.1，不触生产）做
+# 确定性三段验证（ADR-0006）：
+#   阳性——慢速流（远低于阈值）在 ~lowSpeedTime 秒被中止且带低速签名；
+#   阴性——同一慢速源、无配置时不自行中止（证明中止由配置驱动）；
+#   误杀——常速小仓库带同一配置正常完成（正常流量不受影响）。
+# 同时硬断言 job 容器 git ≥ 2.32（GIT_CONFIG_GLOBAL 的最低版本要求）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all = 13 集群全覆盖 / 单集群名；每集群择一 Runner，优先 CPU)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      lowspeed_limit:
+        description: "lowSpeedLimit 字节/秒（默认 1MiB/s，与 git-cdn 生产值一致）"
+        required: false
+        default: "1048576"
+        type: string
+      lowspeed_time:
+        description: "lowSpeedTime 秒（默认 60，与 git-cdn 生产值一致）"
+        required: false
+        default: "60"
+        type: string
+      throttle_bytes_per_sec:
+        description: "模拟限速上游速率 字节/秒（默认 100KB/s，须低于 lowSpeedLimit）"
+        required: false
+        default: "102400"
+        type: string
+      pack_mb:
+        description: "被测仓库 pack 大小 MB（默认 30；慢速下阳性用例会在 lowSpeedTime 秒中止，不会传完）"
+        required: false
+        default: "30"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # 固定消息语言，低速中止签名 grep 才可靠
+  LC_ALL: C
+
+jobs:
+  matrix-setup:
+    name: 解析机制验证矩阵
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json（每集群择一 Runner，优先 CPU）
+        id: set-matrix
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open('.github/config/runners.json') as fp:
+              runners = json.load(fp)['runners']
+          target = "${{ inputs.cluster || 'all' }}".strip()
+
+          by_cluster = {}
+          for r in runners:
+              by_cluster.setdefault(r['cluster'], []).append(r)
+
+          clusters = sorted(by_cluster) if target == 'all' else [target]
+          unknown = [c for c in clusters if c not in by_cluster]
+          if unknown:
+              raise SystemExit(f'runners.json 中不存在集群: {unknown}；不得编造标签')
+
+          selected = []
+          for c in clusters:
+              cands = sorted(by_cluster[c], key=lambda r: (r.get('type') != 'cpu', r['name']))
+              r = cands[0]
+              labels = r['labels']
+              if len(labels) != 2 or c not in labels:
+                  raise SystemExit(f'{c} 双标签异常: {labels}')
+              selected.append(r)
+              print(f'{c}: {r["name"]} labels={labels}')
+
+          matrix = json.dumps({'include': selected}, separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fp:
+              fp.write(f'matrix={matrix}\n')
+              fp.write(f'count={len(selected)}\n')
+          PY
+
+  lowspeed-probe:
+    name: "git-lowspeed ${{ matrix.cluster }} / ${{ matrix.name }}"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    # 与 git-cdn 用例同款 CANN 容器：验证的对象就是 fleet job 容器里的真实 git
+    # （注意：git-cdn pod 内 git 的同等验证仍需 pod 级命令，见 ADR-0006 范围说明）
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CLUSTER_NAME: ${{ matrix.cluster }}
+      ITER_LABEL: ${{ matrix.name }}
+    steps:
+      - name: 建立隔离目录、参数钳制与 git 版本前提检查
+        id: setup
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          for cmd in git python3 timeout grep head; do
+            command -v "$cmd" >/dev/null || { echo "::error::缺少工具 $cmd"; exit 1; }
+          done
+          git --version
+          # GIT_CONFIG_GLOBAL 需要 git ≥ 2.32；低于此版本注入配置会被静默忽略
+          gv=$(git --version | awk '{print $3}')
+          python3 - "$gv" <<'PY'
+          import sys
+
+          v = tuple(int(x) for x in sys.argv[1].split('.')[:2])
+          if v < (2, 32):
+              sys.exit(f'git {sys.argv[1]} < 2.32，不支持 GIT_CONFIG_GLOBAL，限速配置注入无法生效')
+          PY
+          root="$RUNNER_TEMP/git-lowspeed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root/logs" "$root/lab"
+          echo "TEST_ROOT=$root" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import os
+
+          def clamp(name, default, lo, hi):
+              try:
+                  v = int(os.environ.get(name, ''))
+              except ValueError:
+                  v = default
+              v = max(lo, min(hi, v))
+              with open(os.environ['GITHUB_ENV'], 'a') as fp:
+                  fp.write(f'{name}={v}\n')
+
+          clamp('LOWSPEED_LIMIT', 1048576, 1024, 104857600)
+          clamp('LOWSPEED_TIME', 60, 5, 600)
+          clamp('THROTTLE', 102400, 2048, 10485760)
+          clamp('PACK_MB', 30, 2, 100)
+          with open(os.environ['GITHUB_ENV'], 'a') as fp:
+              fp.write(f"POS_TMO={int(os.environ.get('LOWSPEED_TIME', '60')) + 120}\n")
+          PY
+
+      - name: 【用户视角场景】限速流在 lowSpeedTime 内中止 + 阴性对照 + 误杀检查
+        id: experiment
+        timeout-minutes: 11
+        run: |
+          set -euo pipefail
+          # 参数合法性：限速源的速率必须低于阈值，否则阳性用例无意义
+          if [ "$THROTTLE" -ge "$LOWSPEED_LIMIT" ]; then
+            echo "::error::THROTTLE($THROTTLE) ≥ LOWSPEED_LIMIT($LOWSPEED_LIMIT)，请调低节流速率"; exit 1
+          fi
+          cat > "$TEST_ROOT/run-lowspeed.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          work="$TEST_ROOT/lab"; logs="$TEST_ROOT/logs"
+          FAIL=0
+
+          # —— fixture：约 PACK_MB MB pack 的裸仓库（dumb 协议静态服务）——
+          git init -q -b main "$work/seed"
+          cd "$work/seed"
+          git config user.email lowspeed@e2e.invalid; git config user.name lowspeed-e2e
+          echo x > f; git add f; git commit -qm init
+          for i in $(seq 1 "$PACK_MB"); do
+            head -c 1048576 /dev/urandom >> big.bin
+            git add big.bin; git commit -qm "blob $i"
+          done
+          git init -q --bare -b main "$work/src.git"
+          git push -q "$work/src.git" main
+          git -C "$work/src.git" update-server-info
+          git init -q --bare -b main "$work/tiny.git"
+          git init -q -b main "$work/tinyseed"
+          cd "$work/tinyseed"
+          git config user.email lowspeed@e2e.invalid; git config user.name lowspeed-e2e
+          echo ok > f; git add f; git commit -qm tiny
+          git push -q "$work/tiny.git" main
+          git -C "$work/tiny.git" update-server-info
+          cd "$work"
+
+          # —— 两个本地 HTTP 服务（仅 127.0.0.1，OS 分配临时端口避免冲突）：慢速 / 常速 ——
+          cat > "$work/server.py" <<'PY'
+          import functools, http.server, os, sys, time
+          rate = int(os.environ.get("RATE", "0"))
+          class H(http.server.SimpleHTTPRequestHandler):
+              def copyfile(self, source, outputfile):
+                  if rate <= 0:
+                      return super().copyfile(source, outputfile)
+                  chunk, delay = 8192, 8192 / rate
+                  while True:
+                      buf = source.read(chunk)
+                      if not buf:
+                          break
+                      outputfile.write(buf)
+                      outputfile.flush()
+                      time.sleep(delay)
+              def log_message(self, fmt, *args):
+                  sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+          httpd = http.server.ThreadingHTTPServer(
+              ("127.0.0.1", 0),
+              functools.partial(H, directory=os.environ["DIR"]),
+          )
+          with open(os.environ["PORTFILE"], "w") as fp:
+              fp.write(str(httpd.server_address[1]))
+          print("serving on %d" % httpd.server_address[1], flush=True)
+          httpd.serve_forever()
+          PY
+          DIR="$work" PORTFILE="$work/slow.port" RATE="$THROTTLE" \
+            python3 "$work/server.py" > "$logs/server-slow.log" 2>&1 &
+          echo $! > "$work/slow.pid"
+          DIR="$work" PORTFILE="$work/fast.port" RATE=0 \
+            python3 "$work/server.py" > "$logs/server-fast.log" 2>&1 &
+          echo $! > "$work/fast.pid"
+          for i in $(seq 1 25); do
+            [ -s "$work/slow.port" ] && [ -s "$work/fast.port" ] && break
+            sleep 0.2
+          done
+          test -s "$work/slow.port" || { echo "::error::慢速服务未就绪"; exit 1; }
+          test -s "$work/fast.port" || { echo "::error::常速服务未就绪"; exit 1; }
+          SLOW_PORT=$(cat "$work/slow.port"); FAST_PORT=$(cat "$work/fast.port")
+          echo "SLOW_PORT=$SLOW_PORT FAST_PORT=$FAST_PORT" > "$logs/ports.txt"
+          python3 - "$SLOW_PORT" "$FAST_PORT" <<'PY'
+          import sys
+          import urllib.request
+
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          for port, repo in ((sys.argv[1], "src.git"), (sys.argv[2], "tiny.git")):
+              r = opener.open("http://127.0.0.1:%s/%s/info/refs" % (port, repo), timeout=5)
+              assert r.status == 200, (port, r.status)
+          print("servers ok")
+          PY
+
+          # —— 注入与 git-cdn 生产同款语义的 gitconfig ——
+          printf '[http]\n\tlowSpeedLimit = %s\n\tlowSpeedTime = %s\n' \
+            "$LOWSPEED_LIMIT" "$LOWSPEED_TIME" > "$work/gitconfig"
+          cp "$work/gitconfig" "$logs/gitconfig-injected.txt"
+
+          # —— 阳性：慢速流 + 配置 → 预期 ~lowSpeedTime 秒中止且带低速签名 ——
+          t0=$(date +%s); rc=0
+          GIT_CONFIG_GLOBAL="$work/gitconfig" timeout "$POS_TMO" \
+            git -c http.proxy= clone -q "http://127.0.0.1:${SLOW_PORT}/src.git" "$work/dst-pos" \
+            > "$logs/positive.log" 2>&1 || rc=$?
+          dur=$(( $(date +%s) - t0 ))
+          echo "positive dur=${dur}s rc=$rc" > "$logs/positive.meta"
+          sig=$(grep -Eic 'operation too slow|low-speed|curl: \(28\)' "$logs/positive.log" || true)
+          lo=$((LOWSPEED_TIME - 5)); hi=$((LOWSPEED_TIME + 60))
+          if [ "$rc" -eq 124 ]; then
+            echo "::error::阳性用例被外层超时(${POS_TMO}s)强杀：git 未按 lowSpeedTime=${LOWSPEED_TIME}s 中止慢速流，配置未生效"
+            FAIL=1
+          elif [ "$rc" -eq 0 ]; then
+            echo "::error::阳性用例意外成功：${PACK_MB}MB @ ${THROTTLE}B/s 的慢速流未被中止"
+            FAIL=1
+          elif [ "$dur" -lt "$lo" ] || [ "$dur" -gt "$hi" ]; then
+            echo "::error::阳性用例中止耗时 ${dur}s 超出预期窗口 [$lo,$hi]s"
+            FAIL=1
+          elif [ "${sig:-0}" -eq 0 ]; then
+            echo "::error::阳性用例失败但无低速中止签名（unexpected error，见日志）"
+            FAIL=1
+          else
+            echo pass > "$logs/positive.status"
+          fi
+
+          # —— 阴性对照：同一慢速源、无配置 → 不应自行中止（被外层强杀 = 符合预期）——
+          ntmo=$((LOWSPEED_TIME + 15)); t0=$(date +%s); rc=0
+          GIT_CONFIG_GLOBAL= timeout "$ntmo" \
+            git -c http.proxy= clone -q "http://127.0.0.1:${SLOW_PORT}/src.git" "$work/dst-neg" \
+            > "$logs/negative.log" 2>&1 || rc=$?
+          dur=$(( $(date +%s) - t0 ))
+          echo "negative dur=${dur}s rc=$rc" > "$logs/negative.meta"
+          sig=$(grep -Eic 'operation too slow|low-speed|curl: \(28\)' "$logs/negative.log" || true)
+          lo=$((LOWSPEED_TIME + 10))
+          if [ "$rc" -ne 124 ]; then
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::阴性对照意外完成：无配置也传完了，请检查 PACK_MB/THROTTLE 使其在窗口内必然未完成"
+            else
+              echo "::error::阴性对照提前失败 rc=$rc（对照语义要求它在窗口内存活）"
+            fi
+            FAIL=1
+          elif [ "$dur" -lt "$lo" ]; then
+            echo "::error::阴性对照仅存活 ${dur}s(<${lo}s)，疑似被其他机制中止"
+            FAIL=1
+          elif [ "${sig:-0}" -ne 0 ]; then
+            echo "::error::阴性对照出现低速中止签名：该环境 git 无配置也会中止，机制验证不可信"
+            FAIL=1
+          else
+            echo pass > "$logs/negative.status"
+          fi
+
+          # —— 误杀检查：常速小仓库 + 同一配置 → 正常完成 ——
+          t0=$(date +%s); rc=0
+          GIT_CONFIG_GLOBAL="$work/gitconfig" timeout 60 \
+            git -c http.proxy= clone -q "http://127.0.0.1:${FAST_PORT}/tiny.git" "$work/dst-fast" \
+            > "$logs/fast.log" 2>&1 || rc=$?
+          dur=$(( $(date +%s) - t0 ))
+          echo "fast dur=${dur}s rc=$rc" > "$logs/fast.meta"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::常速小仓库带配置克隆失败 rc=$rc：lowSpeed 配置误杀正常流量"
+            FAIL=1
+          elif [ "$dur" -gt 30 ]; then
+            echo "::error::常速小仓库克隆耗时 ${dur}s 异常"
+            FAIL=1
+          else
+            echo pass > "$logs/fast.status"
+          fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            exit 1
+          fi
+          echo "lowSpeed 机制三段验证通过（阳性中止 ${POS_TMO} 上界内 / 阴性存活 / 常速不受影响）"
+          SCRIPT
+          bash "$TEST_ROOT/run-lowspeed.sh"
+
+      - name: Always report pass / fail / not_verified
+        id: report
+        if: always()
+        env:
+          SETUP: ${{ steps.setup.outcome }}
+          EXPERIMENT: ${{ steps.experiment.outcome }}
+        run: |
+          set -euo pipefail
+          # 兜底清理后台服务
+          for pidfile in slow.pid fast.pid; do
+            [ -f "$TEST_ROOT/lab/$pidfile" ] && kill "$(cat "$TEST_ROOT/lab/$pidfile")" 2>/dev/null || true
+          done
+          python3 - <<'PY'
+          import json
+          import os
+
+          root = os.environ.get('TEST_ROOT', '')
+          logs = os.path.join(root, 'logs') if root else ''
+
+          def read(name, default):
+              try:
+                  return open(os.path.join(logs, name)).read().strip()
+              except OSError:
+                  return default
+
+          def outcome(v):
+              return {'success': 'pass', 'failure': 'fail'}.get(v, 'not_verified')
+
+          def meta(name):
+              return read(name, 'not_recorded')
+
+          md = ['## git http.lowSpeed 机制语义验证（TC-FEAT-LOWPEED）', '',
+                '| 检查 | 结果 |', '|---|---|',
+                f"| 工具链与 git ≥ 2.32（GIT_CONFIG_GLOBAL 前提） | {outcome(os.environ['SETUP'])} |",
+                f"| 阳性：限速流按 lowSpeedTime 中止（{meta('positive.meta')}） | {read('positive.status', 'not_verified')} |",
+                f"| 阴性对照：无配置不自行中止（{meta('negative.meta')}） | {read('negative.status', 'not_verified')} |",
+                f"| 误杀检查：常速小仓库带配置完成（{meta('fast.meta')}） | {read('fast.status', 'not_verified')} |",
+                '', f'注入配置：`{read("gitconfig-injected.txt", "").replace(chr(10), "; ")}`']
+
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as fp:
+                  fp.write('\n'.join(md) + '\n')
+
+          result = {
+              'cluster': os.environ.get('CLUSTER_NAME', ''),
+              'runner': os.environ.get('RUNNER_NAME', ''),
+              'setup': outcome(os.environ['SETUP']),
+              'experiment': outcome(os.environ['EXPERIMENT']),
+              'positive': read('positive.status', 'not_verified'),
+              'negative': read('negative.status', 'not_verified'),
+              'fast': read('fast.status', 'not_verified'),
+          }
+          cluster = os.environ.get('CLUSTER_NAME') or 'unknown'
+          with open(os.path.join(logs, f'lowspeed_report_{cluster}.json'), 'w') as fp:
+              json.dump(result, fp, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Upload diagnostic logs (including failures)
+        if: ${{ always() && env.TEST_ROOT != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-lowspeed-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ env.TEST_ROOT }}/logs/
+          retention-days: 7
+          if-no-files-found: warn

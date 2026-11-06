@@ -44,6 +44,7 @@ flowchart TD
 | [`TC-FEAT-GO`](#tc-feat-go) | Go modules 下载与运行 | [Go Cache (Port 8084)](https://ascend-gha-runners.github.io/docs/feature/) | 8084 (HTTP) | `go` | `e2e-feature-go-cache.yml` | golang:1.23-bookworm |
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | openEuler CANN 8.2（root，HOME=/root） |
+| [`TC-FEAT-LOWPEED`](#tc-feat-lowpeed) | git http.lowSpeed 限速自保护机制语义 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 本地受控限速 HTTP（仅 127.0.0.1） | `git`, `python http.server` | `e2e-feature-git-lowspeed.yml` | openEuler CANN 8.2（root，HOME=/root） |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
 
@@ -321,6 +322,41 @@ git -C repo fetch --no-tags origin "$SHA"   # incident 中悬挂 4h 的 fetch-by
 - **软断言**：单次 fetch-by-SHA 最坏耗时低于软阈值（默认 120s，超过仅 WARN 记录趋势，不判负——冷回源大 pack 属正常波动）；
 - **探针**：ambient gitconfig 重写存在性（HOME 与 /root 两侧分别记录，反映 fleet 差异，不判负）；gitcode 实例（`git-cdn-gitcode`）DNS 探针——sh-001/sh-002 未部署实例记 `not_applicable`，gy-001/wlcb-001 为 ExternalName 别名，均不判负；客户端 gitcode 重写存在性仅记录；
 - **统计口径**：单次运行全绿不能单独证明限速修复生效（限速是低概率随机事件）；该用例按"定时采样 × 多轮迭代"设计，故障率统计由看板（update-report-pages）跨运行聚合，结论以长期趋势为准。
+
+---
+
+### TC-FEAT-LOWPEED
+
+#### 1. 基本信息
+- **用例 ID**：`TC-FEAT-LOWPEED`
+- **名称**：git http.lowSpeed 限速自保护机制语义验证（受控限速上游）
+- **官方文档**：[backlog#2885 git-cdn 加限速识别，快失败重试](https://github.com/opensourceways/backlog/issues/2885)
+- **关联工作流**：`.github/workflows/e2e-feature-git-lowspeed.yml`
+- **执行范围**：全部 13 集群（每集群择一 Runner，优先 CPU；验证对象是各集群 job 容器的真实 git）
+- **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`
+- **修复基线**：ascend-ci-deployment `422793a8c`（git-cdn 回源 gitconfig 注入 `http.lowSpeedLimit=1MiB/s` / `lowSpeedTime=60`）
+- **关联 ADR**：[ADR-0006](adr/0006-受控限速上游验证git传输自保护语义.md)（实验室 fixture 三段论，不向生产注入故障）
+
+#### 2. 测试目的
+1. 确定性验证 git-cdn 回源限速保护所依赖的 git 传输自保护语义：慢速流按 `lowSpeedTime` 中止、无配置时不中止、常速流量不误杀；
+2. 硬断言 job 容器 git ≥ 2.32（`GIT_CONFIG_GLOBAL` 注入的最低版本前提，低于此版本配置被静默忽略）；
+3. 为"阈值 1MiB/s + 60s 不误杀"的参数选型提供可复跑证据（默认值与 git-cdn 生产值一致，人工可改参实验）。
+
+#### 3. 生产标准使用方式
+git-cdn 回源子进程的等价行为（本用例在 job 容器内以自建限速 HTTP 服务复现同一传输路径，不向生产注入故障）：
+```bash
+# 慢速源（如 gh-proxy 把 pack 流压到百 KB/s 且不断连）+ 注入配置：
+printf '[http]\n\tlowSpeedLimit = 1048576\n\tlowSpeedTime = 60\n' > gitconfig
+GIT_CONFIG_GLOBAL=$PWD/gitconfig git clone http://127.0.0.1:<port>/src.git
+# 预期：~60s 中止，错误含 "Operation too slow ... (curl_result = 28)"
+# git-cdn 侧由 repo_cache 的 backoff 重试接管，最坏耗时从小时级降到分钟级
+```
+
+#### 4. 判定标准
+- **硬断言**：job 容器 git ≥ 2.32；阳性用例（限速流 + 配置）在 `[lowSpeedTime-5, +60]` 秒内非 0 退出且日志含低速中止签名（`operation too slow` / `low-speed` / `curl: (28)`）；阴性对照（同一限速源、无配置）在窗口内存活不被自行中止；误杀检查（常速小仓库 + 同一配置）正常克隆完成；
+- **软断言**：无（阳性/阴性耗时偏差作为信息记录在 summary）；
+- **探针**：阳性实际中止耗时与 lowSpeedTime 的偏差、阴性存活时长、服务端节流日志（artifact 留档）；
+- **范围说明**：验证对象是 fleet job 容器内的 git 机制语义；git-cdn pod 内回源子进程的同等验证需 pod 级命令（`git config --show-origin --global --get-regexp '^http\.lowspeed|^uploadpack'`），超出 runner E2E 可达范围。
 
 ---
 

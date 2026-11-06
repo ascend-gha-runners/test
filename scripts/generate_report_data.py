@@ -240,6 +240,7 @@ def get_test_case_info(workflow_name, catalog):
         "e2e-feature-apt-cache": "Ubuntu APT 镜像缓存服务验证 (8081)",
         "e2e-feature-crates-cache": "crates.io 缓存服务验证 (8085)",
         "e2e-feature-git-cdn": "git-cdn 回源限速保护与快失败验证 (8000)",
+        "e2e-feature-git-lowspeed": "git http.lowSpeed 限速自保护机制语义验证",
         "e2e-feature-pypi-cache": "PyPI 缓存服务验证 (80)",
         "e2e-feature-rustup-cache": "Rustup 工具链缓存服务验证 (8082)",
         "e2e-feature-yum-cache": "openEuler YUM/DNF 镜像缓存服务验证 (8083)",
