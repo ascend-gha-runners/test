@@ -139,6 +139,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    # 必须指定镜像：pod template 的 lifecycle.postStart 把 git-cdn insteadOf 写进
+    # /root/.gitconfig，只有以 root/HOME=/root 运行的容器（如各特性用例同款 CANN
+    # 镜像，vllm-ascend CI 同款）才能让它成为生效的全局配置；不指定时落到
+    # runner 镜像（HOME=/home/runner），ambient 注入不可见
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
     env:
       CLUSTER_NAME: ${{ matrix.cluster }}
       ITERATIONS: ${{ inputs.iterations || '3' }}
@@ -196,9 +202,10 @@ jobs:
             echo "::error::${GIT_CDN_HOST} DNS 解析失败"
             exit 1
           fi
-          # ambient 探针（仅诊断，不判负）：各 fleet runner 镜像 HOME 不同——k8s 容器模式作业
-          # HOME=/github/home，configmap postStart 钩子把重写追加在 /root/.gitconfig，
-          # ambient global config 是否生效因 fleet 而异，不能作为跨集群硬断言
+          # ambient 探针（仅诊断，不判负）：生效与否取决于 job 容器是否以 HOME=/root 运行
+          # ——本用例指定 CANN 镜像（root，vllm-ascend CI 同款）时 postStart 写入的
+          # /root/.gitconfig 即为生效全局配置，预期 root_gitcdn；若某 fleet runner 镜像
+          # HOME 不同（如 runner 镜像的 /home/runner），ambient 即不可见，仍由下方注入兜底
           ambient="absent"
           if git config --global --get-regexp 'insteadof' 2>/dev/null | grep -qF "$GIT_CDN_HOST"; then
             ambient="home_gitcdn"
@@ -223,7 +230,7 @@ jobs:
           # smart 协议探针：绕过 squid 直连，跟随 git-cdn 的 .git 规范化 302
           code=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
             -o "$logs/info-refs-body.txt" -w '%{http_code}' \
-            "http://${GIT_CDN_HOST}:8000/${repo_path}/info/refs?service=git-upload-pack") || code=unreachable
+            "http://${GIT_CDN_HOST}:8000/${repo_path}.git/info/refs?service=git-upload-pack") || code=unreachable
           if [ "$code" = 200 ] && grep -q '# service=git-upload-pack' "$logs/info-refs-body.txt"; then
             echo "pass" > "$logs/info-refs.status"
           else
@@ -238,7 +245,7 @@ jobs:
           else
             gcode=$(curl --noproxy '*' -sSL --connect-timeout 5 --max-time 45 \
               -o /dev/null -w '%{http_code}' \
-              "http://${GIT_CDN_GITCODE_HOST}:8000/${repo_path}/info/refs?service=git-upload-pack") || gcode=unreachable
+              "http://${GIT_CDN_GITCODE_HOST}:8000/${repo_path}.git/info/refs?service=git-upload-pack") || gcode=unreachable
             echo "gitcode_instance=${gcode}" > "$logs/gitcode.status"
           fi
           # 客户端 gitcode 重写存在性（sh-001/sh-002 的 configmap 无此配置，仅记录）

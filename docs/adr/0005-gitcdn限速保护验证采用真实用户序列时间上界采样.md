@@ -38,7 +38,10 @@ incident 中 actions/checkout 的按 SHA fetch 在 git-cdn 限速流上悬挂约
   生效因 fleet 而异，仅记探针（首次全量 dispatch 13/13 集群因此失败后修正）。
 - 软阈值（单次 fetch-by-SHA 耗时，默认 120s）只承担趋势观察：冷回源大 pack 与缓存命中之间存在
   数量级波动，超过软阈值仅 WARN，不伪装成硬失败。
-- 定时采样在 Runner Pod 真实用户环境（Host Environment，无容器隔离）执行，客户端重写目标
-  与 incident 一致（显式注入，见上）；不在本轮引入 ArgoCD revision 门禁或部署等待作为验收前提。
+- 定时采样以 CANN 容器（root / HOME=/root，与 vllm-ascend CI 同款镜像）在 Runner Pod 内执行：
+  pod template 的 postStart 钩子向 /root/.gitconfig 追加的 git-cdn 重写在容器内即生产等价生效；
+  客户端重写目标与 incident 一致，GIT_CONFIG_GLOBAL 注入仍保留为跨 fleet 确定性兜底（不指定
+  镜像时作业落到 HOME=/home/runner 的 runner 镜像，ambient 注入不可见——首次全量 dispatch 即踩中）。
+  不在本轮引入 ArgoCD revision 门禁或部署等待作为验收前提。
 - 需要验证 git-cdn 配置渲染正确性时，由 ascend-ci-deployment 的守护单测
   （`tests/test_gitcdn_lowspeed_gitconfig.py`）承担；本仓库不重复断言服务端内部配置。
