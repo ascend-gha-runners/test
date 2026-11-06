@@ -295,7 +295,9 @@ jobs:
           #    最新 SHA 大概率不在 git-cdn pack 缓存内，会触发回源，即被测限速保护路径
           for i in $(seq 1 "$ITERATIONS"); do
             run_op "i${i}-lsremote" "$LSREMOTE_TIMEOUT" git ls-remote "$REPO_URL" "refs/heads/$BRANCH"
-            sha=$(awk 'NR==1 {print $1}' "$logs/i${i}-lsremote.log")
+            # 只认 "<40位hex>\t<ref>" 行：经 git-cdn 的 ls-remote 会先输出
+            # "warning: redirecting to ..."，不能按行号取第一行
+            sha=$(grep -E $'^[0-9a-f]{40}\t' "$logs/i${i}-lsremote.log" | head -n 1 | cut -f1)
             if [ -z "$sha" ]; then
               echo "::error::[i${i}] ls-remote 未解析到 $BRANCH 的 SHA"
               FAIL=1
