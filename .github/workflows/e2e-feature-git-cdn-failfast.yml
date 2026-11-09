@@ -1,0 +1,483 @@
+name: e2e-feature-git-cdn-failfast
+# git-cdn 限速快失败与重试自愈语义验证（并发客户端时间线有界采样）— opensourceways/backlog#2885
+#
+# 与 TC-FEAT-GITCDN（ADR-0005）互补的语义分工：
+#   - e2e-feature-git-cdn.yml：正常时段健康采样，任何限速签名即判负（"无限速全绿"）；
+#   - 本用例（ADR-0007）：允许限速发生——判负的不是限速签名，而是"卡死"
+#     （被外层 timeout 强杀 = 悬挂形态）。限速被 git-cdn 快失败 + repo_cache
+#     backoff(BACKOFF_START, BACKOFF_COUNT) 重试吸收（有界失败 / 慢速后自愈成功）
+#     即机制按设计工作，作为证据记录而非失败。
+#
+# 验证边界（ADR-0004/0005/0007）：不向生产 git-cdn / 上游注入故障，观测只用
+# 客户端时间线（每操作 start/耗时/exit/签名）。dispatch 可调并发度（正常用户
+# 多 job 并发形态）提高撞上游随机限速的概率；单次运行遇不到限速时输出
+# "正常回源全部有界完成"，限速事件的长期结论由看板跨运行统计收敛。
+#
+# 判定窗口与生产参数对齐：限速流 ~lowSpeedTime(60s) 中止 → backoff(0.5, 5) 重试，
+# 最坏重试链 ≈ 6 次尝试 × 60s + 指数退避 ≈ 376s；单操作上界默认 480s 保证
+# "重试耗尽后返回错误"不被误判为悬挂强杀。
+
+on:
+  schedule:
+    # 每天 UTC 7 点（北京 15:00 业务高峰，上游限速概率最高的时段）低频加强采样
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "目标集群 (all = 13 集群全覆盖 / 单集群名)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+      concurrency:
+        description: "并发采样流数 (1-3，默认 1；多路并发 fetch 模拟多 job 并发形态，提高撞限速概率)"
+        required: false
+        default: "1"
+        type: string
+      iterations:
+        description: "每流 fetch 采样轮次 (1-3，默认 2)"
+        required: false
+        default: "2"
+        type: string
+      op_timeout_seconds:
+        description: "单次 fetch/ls-remote 时间上界秒数 (60-600，默认 480；须大于最坏重试链 ~376s)"
+        required: false
+        default: "480"
+        type: string
+      clone_timeout_seconds:
+        description: "全量 clone 时间上界秒数 (120-1200，默认 720)"
+        required: false
+        default: "720"
+        type: string
+      lowspeed_time:
+        description: "git-cdn 生产 lowSpeedTime 秒（默认 60，信息项：慢速成功归类阈值与重试次数估算分母）"
+        required: false
+        default: "60"
+        type: string
+      repo_url:
+        description: "被测仓库（仅支持 https://github.com/ 前缀，insteadOf 重写只覆盖 github.com）"
+        required: false
+        default: "https://github.com/vllm-project/vllm-ascend"
+        type: string
+      branch:
+        description: "被测分支"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GIT_CDN_HOST: git-cdn-service.git-cdn.svc.cluster.local
+  # Schedule 触发时 inputs 渲染为空，统一走 || 默认值（避坑基线 #4）
+  REPO_URL: ${{ inputs.repo_url || 'https://github.com/vllm-project/vllm-ascend' }}
+  BRANCH: ${{ inputs.branch || 'main' }}
+  # git 限速/传输故障签名（含 incident 实际出现的 "Could not resolve HEAD to a revision"）
+  GIT_FAIL_SIG: 'fatal: Could not resolve HEAD to a revision|the remote end hung up|early EOF|RPC failed|curl: \(28\)|returned error: [45][0-9][0-9]|index-pack failed|expected flush packet|bad pack file'
+
+jobs:
+  matrix-setup:
+    name: 解析 git-cdn 集群矩阵
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 解析 runners.json（每集群择一 Runner，优先 CPU）
+        id: set-matrix
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open('.github/config/runners.json') as fp:
+              runners = json.load(fp)['runners']
+          target = "${{ inputs.cluster || 'all' }}".strip()
+
+          # 覆盖判定：runners.json 登记的每个集群都必须有被测 Runner。
+          # 同集群 cpu/npu 共享同一套集群级 git-cdn 实例，每集群择一即可全覆盖。
+          by_cluster = {}
+          for r in runners:
+              by_cluster.setdefault(r['cluster'], []).append(r)
+
+          clusters = sorted(by_cluster) if target == 'all' else [target]
+          unknown = [c for c in clusters if c not in by_cluster]
+          if unknown:
+              raise SystemExit(f'runners.json 中不存在集群: {unknown}；不得编造标签')
+
+          selected = []
+          for c in clusters:
+              cands = sorted(by_cluster[c], key=lambda r: (r.get('type') != 'cpu', r['name']))
+              r = cands[0]
+              labels = r['labels']
+              if len(labels) != 2 or c not in labels:
+                  raise SystemExit(f'{c} 双标签异常: {labels}')
+              selected.append(r)
+              print(f'{c}: {r["name"]} labels={labels}')
+
+          matrix = json.dumps({'include': selected}, separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fp:
+              fp.write(f'matrix={matrix}\n')
+              fp.write(f'count={len(selected)}\n')
+          PY
+
+  git-cdn-failfast:
+    name: "git-cdn-failfast ${{ matrix.cluster }} / ${{ matrix.name }}"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    # 工作流级硬上界：本用例的判负对象就是"卡死"，作业本身必须永不悬挂
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    # 与 git-cdn 用例同款 CANN 镜像：root / HOME=/root，pod template postStart 写入的
+    # git-cdn insteadOf 在该容器内即为生效全局配置；显式 GIT_CONFIG_GLOBAL 注入仍作兜底
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      CLUSTER_NAME: ${{ matrix.cluster }}
+      ITER_LABEL: ${{ matrix.name }}
+      CONCURRENCY: ${{ inputs.concurrency || '1' }}
+      ITERATIONS: ${{ inputs.iterations || '2' }}
+      OP_TIMEOUT: ${{ inputs.op_timeout_seconds || '480' }}
+      CLONE_TIMEOUT: ${{ inputs.clone_timeout_seconds || '720' }}
+      LOWSPEED_TIME: ${{ inputs.lowspeed_time || '60' }}
+      LSREMOTE_TIMEOUT: "60"
+    steps:
+      - name: 建立隔离测试目录、参数钳制与前提检查
+        id: setup
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          for cmd in git timeout python3 getent awk; do
+            command -v "$cmd" >/dev/null || { echo "::error::缺少工具 $cmd"; exit 1; }
+          done
+          git --version
+          # GIT_CONFIG_GLOBAL 需要 git ≥ 2.32（与 git-cdn 注入路径同款前提，低于此版本静默忽略）
+          gv=$(git --version | awk '{print $3}')
+          python3 - "$gv" <<'PY'
+          import sys
+
+          v = tuple(int(x) for x in sys.argv[1].split('.')[:2])
+          if v < (2, 32):
+              sys.exit(f'git {sys.argv[1]} < 2.32，不支持 GIT_CONFIG_GLOBAL，insteadOf 注入无法生效')
+          PY
+          # 临时目录按 run+attempt 唯一（避坑基线 #2），放 RUNNER_TEMP 不入共享 SFS
+          root="$RUNNER_TEMP/git-cdn-failfast-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root/logs" "$root/work"
+          echo "TEST_ROOT=$root" >> "$GITHUB_ENV"
+          # 人工输入钳制：单操作上界必须大于生产最坏重试链（~(BACKOFF_COUNT+1)×60s+退避 ≈ 376s），
+          # 否则"重试耗尽后返回错误"会被外层强杀误判成悬挂
+          python3 - <<'PY'
+          import os
+
+          def clamp(name, default, lo, hi):
+              try:
+                  v = int(os.environ.get(name, ''))
+              except ValueError:
+                  v = default
+              v = max(lo, min(hi, v))
+              with open(os.environ['GITHUB_ENV'], 'a') as fp:
+                  fp.write(f'{name}={v}\n')
+
+          clamp('CONCURRENCY', 1, 1, 3)
+          clamp('ITERATIONS', 2, 1, 3)
+          clamp('OP_TIMEOUT', 480, 380, 600)
+          clamp('CLONE_TIMEOUT', 720, 120, 1200)
+          clamp('LOWSPEED_TIME', 60, 10, 300)
+          PY
+          # 打印最坏 wall-clock 估算，人工拉满参数时提醒会被 60min 作业上界截断
+          python3 - <<'PY'
+          import os
+
+          it, op, cl = (int(os.environ['ITERATIONS']),
+                        int(os.environ['OP_TIMEOUT']),
+                        int(os.environ['CLONE_TIMEOUT']))
+          worst = 60 + cl + it * (60 + 2 * op)
+          print(f"参数: ITERATIONS={it} OP_TIMEOUT={op} CLONE_TIMEOUT={cl}")
+          print(f"最坏 wall-clock 估算 ≈ {worst}s ({worst // 60}min)；作业硬上界 60min，"
+              + ("超出部分会被截断判负，请调低参数" if worst > 3300 else "在界内"))
+          PY
+
+      - name: 【基础功能】git-cdn 端点与客户端重写检查
+        id: basic
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          logs="$TEST_ROOT/logs"
+          echo "REPO_URL=$REPO_URL BRANCH=$BRANCH CONCURRENCY=$CONCURRENCY ITERATIONS=$ITERATIONS"
+          case "$REPO_URL" in
+            https://github.com/*) : ;;
+            *) echo "::error::REPO_URL 仅支持 https://github.com/ 前缀（insteadOf 重写只覆盖 github.com）"; exit 1 ;;
+          esac
+          # github 实例 DNS（硬断言：集群内 git-cdn 必须可解析）
+          if ! getent hosts "$GIT_CDN_HOST" >/dev/null; then
+            echo "::error::${GIT_CDN_HOST} DNS 解析失败"
+            exit 1
+          fi
+          # 用户场景重写显式注入：与生产 configmap postStart 写入的 insteadOf 目标完全一致，
+          # 消除各 fleet HOME 差异影响；连通验证由场景步骤 00-lsremote（真实 git 客户端）承担
+          cat > "$TEST_ROOT/gitconfig" <<EOF
+          [url "http://${GIT_CDN_HOST}:8000/"]
+              insteadOf = https://github.com/
+          EOF
+          cp "$TEST_ROOT/gitconfig" "$logs/gitconfig-injected.txt"
+          if ! GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig" git config --global --get-regexp 'insteadof' 2>/dev/null | grep -qF "$GIT_CDN_HOST"; then
+            echo "::error::注入的 GIT_CONFIG_GLOBAL 未生效（未读出 ${GIT_CDN_HOST} insteadOf）"
+            exit 1
+          fi
+          echo "injected rewrite: $(GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig" git config --global --get-regexp 'insteadof' | head -1)"
+
+      - name: 【用户视角场景】限速快失败/重试自愈：串行基座 + 并发采样流
+        id: scenario
+        timeout-minutes: 58
+        run: |
+          set -euo pipefail
+          # 所有 git 子进程统一走 basic 步骤注入的 GIT_CONFIG_GLOBAL
+          export GIT_CONFIG_GLOBAL="$TEST_ROOT/gitconfig"
+          cat > "$TEST_ROOT/run-failfast.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          work="$TEST_ROOT/work"; logs="$TEST_ROOT/logs"
+          T0=$(date +%s)
+
+          # —— 操作执行器：每操作独立上界 + 时间线记录（并发安全：每流独立 tsv/log）——
+          # 判定语义（ADR-0007）：exit 124（悬挂强杀）与 exit≠0 无签名（异常错误）判负；
+          # exit≠0 带限速签名 = 快失败按设计工作（记录证据，不判负）
+          run_op() {
+            local stream="$1" label="$2" tmo="$3"; shift 3
+            local f="$logs/s${stream}-${label}.log" rc=0 ta tb sig=""
+            ta=$(date +%s)
+            timeout "$tmo" "$@" >"$f" 2>&1 || rc=$?
+            tb=$(date +%s)
+            if grep -Eq "$GIT_FAIL_SIG" "$f"; then sig="rate_limit_signature"; fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$stream" "$label" "$((ta - T0))" "$((tb - ta))" "$rc" "$sig" >> "$logs/ops-s${stream}.tsv"
+            if [ "$rc" -eq 124 ]; then
+              echo "::error::[s${stream}/${label}] 超过 ${tmo}s 上界被强杀——悬挂形态（本用例的判负对象），日志尾部: $(tail -n 5 "$f" | tr '\n\t' '  ')"
+              echo "${stream}:${label}:hang" >> "$logs/violations.txt"
+            elif [ "$rc" -ne 0 ] && [ -z "$sig" ]; then
+              echo "::error::[s${stream}/${label}] exit=$rc 且无限速签名——异常错误，日志尾部: $(tail -n 5 "$f" | tr '\n\t' '  ')"
+              echo "${stream}:${label}:unexpected" >> "$logs/violations.txt"
+            elif [ "$rc" -ne 0 ]; then
+              echo "[s${stream}/${label}] exit=$rc 带限速签名，$((tb - ta))s 有界结束——限速被快失败+重试吸收（证据记录，不判负）"
+            fi
+            return 0
+          }
+
+          # —— Stage A（串行基座）：ls-remote 协议连通 + 全量 clone（对标 fetch-depth: 0）——
+          run_op 0 "00-lsremote" "$LSREMOTE_TIMEOUT" git ls-remote "$REPO_URL" "refs/heads/$BRANCH"
+          run_op 0 "01-clone-full" "$CLONE_TIMEOUT" git clone --no-checkout "$REPO_URL" "$work/repo"
+          # 重定向证据（硬断言，与 incident 日志中 "warning: redirecting to http://git-cdn..." 一致）：
+          # 证明流量确实经过 git-cdn，避免直连上游时"全绿但没测到"的假阳性
+          if ! grep -F "redirecting to http://${GIT_CDN_HOST}" "$logs/s0-01-clone-full.log" >/dev/null; then
+            echo "::error::clone 日志缺少 git-cdn 重定向证据，无法证明流量经过 git-cdn"
+            # violation 引用真实 op label（01-clone-full）：report 步按 label 关联判定分类
+            echo "0:01-clone-full:unexpected" >> "$logs/violations.txt"
+          fi
+
+          # —— Stage B（并发采样流）：每流独立 fetch 目录，模拟多 job 并发拉代码的用户形态。
+          #     每轮取最新分支 SHA 再按 SHA fetch（incident 中悬挂 4h 的操作形态）；
+          #     最新 SHA 大概率不在 git-cdn pack 缓存内，触发回源即被测路径
+          for s in $(seq 1 "$CONCURRENCY"); do
+            (
+              dir="$work/stream$s"
+              git init -q "$dir"
+              git -C "$dir" remote add origin "$REPO_URL"
+              for i in $(seq 1 "$ITERATIONS"); do
+                run_op "$s" "i${i}-lsremote" "$LSREMOTE_TIMEOUT" git ls-remote "$REPO_URL" "refs/heads/$BRANCH"
+                # 只认 "<40位hex>\t<ref>" 行：经 git-cdn 的 ls-remote 会先输出
+                # "warning: redirecting to ..."，不能按行号取第一行
+                sha=$(grep -E $'^[0-9a-f]{40}\t' "$logs/s${s}-i${i}-lsremote.log" 2>/dev/null | head -n 1 | cut -f1)
+                if [ -z "$sha" ]; then
+                  # lsremote 操作本身已失败时 run_op 已判 hang/unexpected，不重复记违规
+                  lsrc=$(tail -n 1 "$logs/ops-s${s}.tsv" | cut -f5)
+                  if [ "$lsrc" -eq 0 ]; then
+                    echo "::error::[s${s}/i${i}] ls-remote 未解析到 $BRANCH 的 SHA"
+                    echo "${s}:i${i}-lsremote:unexpected" >> "$logs/violations.txt"
+                  fi
+                  continue
+                fi
+                run_op "$s" "i${i}-fetch-main" "$OP_TIMEOUT" git -C "$dir" fetch --no-tags origin "$BRANCH"
+                run_op "$s" "i${i}-fetch-sha" "$OP_TIMEOUT" git -C "$dir" fetch --no-tags origin "$sha"
+              done
+              exit 0
+            ) > "$logs/s${s}-stream.out" 2>&1 &
+          done
+          # 后台流聚合判定，wait 返回值不参与判定（错误已在 violations.txt 中记录）
+          wait || true
+
+          # —— 汇总判定：violations（hang/unexpected）非空即场景失败 ——
+          if [ -f "$logs/violations.txt" ]; then
+            echo "场景违规清单:"
+            cat "$logs/violations.txt"
+            exit 1
+          fi
+          ops_total=$(cat "$logs"/ops-s*.tsv | wc -l)
+          echo "场景完成：全部 ${ops_total} 个操作有界结束，无悬挂、无异常错误"
+          SCRIPT
+          bash "$TEST_ROOT/run-failfast.sh"
+
+      - name: Always report 时间线可视化与判定汇总
+        id: report
+        if: always()
+        env:
+          SETUP: ${{ steps.setup.outcome }}
+          BASIC: ${{ steps.basic.outcome }}
+          SCENARIO: ${{ steps.scenario.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          root = os.environ.get('TEST_ROOT', '')
+          logs = os.path.join(root, 'logs') if root else ''
+
+          def read(name, default=''):
+              try:
+                  return open(os.path.join(logs, name)).read().strip()
+              except OSError:
+                  return default
+
+          def outcome(v):
+              return {'success': 'pass', 'failure': 'fail'}.get(v, 'not_verified')
+
+          # —— 合并各流时间线：stream / label / start / dur / rc / sig ——
+          events = []
+          for path in sorted(glob.glob(os.path.join(logs, 'ops-s*.tsv'))):
+              for line in open(path):
+                  parts = line.rstrip('\n').split('\t')
+                  if len(parts) == 6:
+                      events.append(parts)
+
+          lowspeed = int(os.environ.get('LOWSPEED_TIME', '60'))
+          viol = set(read('violations.txt').splitlines()) if read('violations.txt') else set()
+
+          def classify(stream, label, dur, rc, sig):
+              key = f'{stream}:{label}:hang'
+              if key in viol or rc == '124':
+                  return 'HANG'
+              key = f'{stream}:{label}:unexpected'
+              if key in viol or (rc != '0' and not sig):
+                  return 'UNEXPECTED'
+              if rc != '0':
+                  return 'fail_fast'
+              # 慢速但成功：疑似经历限速中止 + backoff 重试后自愈（信息项，不判负）
+              return 'recovered' if dur >= lowspeed else 'normal'
+
+          for e in events:
+              e.append(classify(e[0], e[1], int(e[3]), e[4], e[5]))
+
+          events.sort(key=lambda e: (int(e[2]), e[0], e[1]))
+          durs = [int(e[3]) for e in events] or [0]
+          max_dur = max(durs)
+          counts = {}
+          for e in events:
+              counts[e[6]] = counts.get(e[6], 0) + 1
+          label_cn = {
+              'normal': '正常',
+              'fail_fast': '快失败吸收（限速→有界失败）',
+              'recovered': '疑似重试自愈（慢速成功）',
+              'HANG': '悬挂强杀（判负）',
+              'UNEXPECTED': '异常错误（判负）',
+          }
+          verdict_cnt = ' / '.join(f'{label_cn[k]} {counts.get(k, 0)}' for k in
+                                   ('normal', 'fail_fast', 'recovered', 'HANG', 'UNEXPECTED'))
+
+          it_n = os.environ.get('ITERATIONS', '2')
+          conc = os.environ.get('CONCURRENCY', '1')
+
+          md = ['## git-cdn 限速快失败与重试自愈 E2E（TC-FEAT-GITCDN-FAILFAST）', '',
+                f'参数：并发流 {conc} × 每流 {it_n} 轮 ｜ lowSpeedTime(生产) = {lowspeed}s ｜ 单操作上界 = {os.environ.get("OP_TIMEOUT", "480")}s',
+                '',
+                '| 检查 | 结果 |', '|---|---|',
+                f"| 隔离目录、参数钳制与 git ≥ 2.32 | {outcome(os.environ['SETUP'])} |",
+                f"| 端点 DNS + insteadOf 重写注入自检 | {outcome(os.environ['BASIC'])} |",
+                f"| 串行基座 + {conc} 并发流采样（{it_n} 轮/流）有界完成 | {outcome(os.environ['SCENARIO'])} |",
+                '', f'**判定分类**：{verdict_cnt}', '']
+          if counts.get('fail_fast', 0) + counts.get('recovered', 0) > 0:
+              md += ['### 限速事件观察（本轮观测到限速形态）', '',
+                     '- 快失败吸收 / 疑似重试自愈均属**机制按设计工作**的证据：限速流被'
+                     f' ~{lowspeed}s 中止后由 backoff 重试接管，客户端视角表现为有界失败或慢速成功；',
+                     '- 判负对象只有 HANG（悬挂强杀）与 UNEXPECTED（无签名异常错误）；', '']
+          else:
+              md += ['### 限速事件观察（本轮未观测到限速形态）', '',
+                     '随机限速是低概率事件，本轮全部操作正常有界完成；"限速时快失败重试"的',
+                     '结论由定时采样在看板跨运行统计收敛（ADR-0007 统计口径）。', '']
+
+          # —— 时间线可视化（按开始时间排序，ASCII 条形满刻度 = 最坏耗时）——
+          md += ['### 操作时间线', '', '| 流 | 操作 | 开始s | 耗时s | exit | 判定 | 签名 | 耗时条 |', '|---|---|---|---|---|---|---|---|']
+          for stream, label, start, dur, rc, sig, verdict in events:
+              bar = '▇' * max(1, round(int(dur) / max_dur * 36)) if max_dur else ''
+              tag = {'fail_fast': 'fail_fast', 'recovered': 'recovered',
+                     'HANG': '**HANG**', 'UNEXPECTED': '**UNEXPECTED**'}.get(verdict, verdict)
+              if verdict == 'recovered':
+                  est = max(1, round(int(dur) / lowspeed))
+                  tag += f'(≈{est}×{lowspeed}s)'
+              md.append(f'| s{stream} | {label} | {start} | {dur} | {rc} | {tag} | {sig or "-"} | `{bar} {dur}s` |')
+
+          md += ['', f'最坏操作耗时 **{max_dur}s**（incident 基线为小时级悬挂，'
+                     f'生产最坏重试链 ≈ 6×{lowspeed}s+退避；被强杀=悬挂判负）']
+
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as fp:
+                  fp.write('\n'.join(md) + '\n')
+
+          result = {
+              'cluster': os.environ.get('CLUSTER_NAME', ''),
+              'runner': os.environ.get('RUNNER_NAME', ''),
+              'concurrency': conc,
+              'iterations': it_n,
+              'lowspeed_time': lowspeed,
+              'events': [{'stream': s, 'op': l, 'start_s': int(st), 'seconds': int(d),
+                          'exit': int(rc), 'signature': sg, 'verdict': vd}
+                         for s, l, st, d, rc, sg, vd in events],
+              'counts': counts,
+              'worst_seconds': max_dur,
+              'violations': sorted(viol),
+              'setup': outcome(os.environ['SETUP']),
+              'basic': outcome(os.environ['BASIC']),
+              'scenario': outcome(os.environ['SCENARIO']),
+          }
+          cluster = os.environ.get('CLUSTER_NAME') or 'unknown'
+          with open(os.path.join(logs, f'gitcdn_failfast_report_{cluster}.json'), 'w') as fp:
+              json.dump(result, fp, ensure_ascii=False, indent=2)
+
+          # 违规复核（与 scenario 步即时判定同口径，report 在 always 下兜底复核）
+          if counts.get('HANG', 0) or counts.get('UNEXPECTED', 0):
+              print(f"::error::判定复核：HANG={counts.get('HANG', 0)} UNEXPECTED={counts.get('UNEXPECTED', 0)}——限速未受控（悬挂或异常错误）")
+          PY
+
+      - name: Upload diagnostic logs (including failures)
+        if: ${{ always() && env.TEST_ROOT != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-cdn-failfast-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ env.TEST_ROOT }}/logs/
+          retention-days: 7
+          if-no-files-found: warn

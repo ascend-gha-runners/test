@@ -45,6 +45,7 @@ flowchart TD
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | openEuler CANN 8.2（root，HOME=/root） |
 | [`TC-FEAT-LOWPEED`](#tc-feat-lowpeed) | git http.lowSpeed 限速自保护机制语义 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 本地受控限速 HTTP（仅 127.0.0.1） | `git`, `python http.server` | `e2e-feature-git-lowspeed.yml` | openEuler CANN 8.2（root，HOME=/root） |
+| [`TC-FEAT-GITCDN-FAILFAST`](#tc-feat-gitcdn-failfast) | git-cdn 限速快失败与重试自愈 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn-failfast.yml` | openEuler CANN 8.2（root，HOME=/root） |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
 
@@ -357,6 +358,48 @@ GIT_CONFIG_GLOBAL=$PWD/gitconfig git clone http://127.0.0.1:<port>/src.git
 - **软断言**：无（阳性/阴性耗时偏差作为信息记录在 summary）；
 - **探针**：阳性实际中止耗时与 lowSpeedTime 的偏差、阴性存活时长、服务端节流日志（artifact 留档）；
 - **范围说明**：验证对象是 fleet job 容器内的 git 机制语义；git-cdn pod 内回源子进程的同等验证需 pod 级命令（`git config --show-origin --global --get-regexp '^http\.lowspeed|^uploadpack'`），超出 runner E2E 可达范围。
+
+---
+
+### TC-FEAT-GITCDN-FAILFAST
+
+#### 1. 基本信息
+- **用例 ID**：`TC-FEAT-GITCDN-FAILFAST`
+- **名称**：git-cdn 限速快失败与重试自愈（并发客户端时间线有界采样，Port 8000）
+- **官方文档**：[backlog#2885 git-cdn 加限速识别，快失败重试](https://github.com/opensourceways/backlog/issues/2885)
+- **关联工作流**：`.github/workflows/e2e-feature-git-cdn-failfast.yml`
+- **执行范围**：全部 13 集群（runners.json 每集群择一 Runner，优先 CPU；同集群 cpu/npu 共享同一套集群级 git-cdn 实例）；定时每天 1 次（UTC 7 北京 15:00 高峰时段）+ 人工 dispatch
+- **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`（root / HOME=/root，pod template postStart 的 git-cdn 重写在该容器内即为生效全局配置；GIT_CONFIG_GLOBAL 注入仍为跨 fleet 确定性兜底）
+- **修复基线**：ascend-ci-deployment `422793a8c`（回源 gitconfig 注入 `http.lowSpeedLimit=1MiB/s` / `lowSpeedTime=60`）+ 生产重试参数（`BACKOFF_START=0.5` / `BACKOFF_COUNT=5`，`REQUEST_MAX_RETRIES=10`）
+- **关联 ADR**：[ADR-0007](adr/0007-gitcdn限速快失败重试语义采用并发客户端时间线有界采样.md)（判负对象是卡死而非限速；与 ADR-0005/0006 的语义分工见该 ADR）
+
+#### 2. 测试目的
+1. 验证限速发生时 git-cdn 的行为形态是"快失败 + backoff 重试自愈"（有界失败或慢速后成功），而不是 incident 中小时级悬挂——判负对象只有悬挂强杀与异常错误，限速签名本身不判负（与 TC-FEAT-GITCDN 的"无签名全绿"语义互补）；
+2. 以可调并发流（默认 1，dispatch 可调 1-3）模拟多 job 并发拉代码的正常用户形态，提高撞上游随机限速的概率；
+3. 输出客户端时间线可视化（每操作开始偏移 / 耗时 / exit / 判定 / ASCII 耗时条），慢速成功按 `duration/lowSpeedTime` 折算疑似重试次数；"很多次上游请求"的重试证据以此形态推断呈现（服务端 /metrics 观测留作后续迭代）。
+
+#### 3. 生产标准使用方式
+```bash
+# 与生产 configmap postStart 完全一致的 insteadOf 重写（多 job 并发形态）：
+export GIT_CONFIG_GLOBAL="$PWD/gitconfig"
+cat > "$GIT_CONFIG_GLOBAL" <<EOF
+[url "http://git-cdn-service.git-cdn.svc.cluster.local:8000/"]
+    insteadOf = https://github.com/
+EOF
+# 流 k（k=1..N 并发）各自独立目录循环执行 incident 操作形态：
+git init -q streamK && git -C streamK remote add origin https://github.com/vllm-project/vllm-ascend
+SHA=$(git ls-remote https://github.com/vllm-project/vllm-ascend refs/heads/main | awk '{print $1}')
+git -C streamK fetch --no-tags origin main
+git -C streamK fetch --no-tags origin "$SHA"
+# 限速发生时：回源 git 子进程 ~60s 中止（curl 28）→ git-cdn backoff(0.5, 5) 重试 →
+# 客户端看到有界失败（最坏 ≈ 6×60s+退避 ≈ 376s）或慢速后成功——而不是小时级悬挂
+```
+
+#### 4. 判定标准
+- **硬断言**：注入的 GIT_CONFIG_GLOBAL 重写自检生效，clone 日志含 git-cdn 302 重定向证据；串行基座（ls-remote + 全量 clone）与并发采样流全部操作有界结束——无 `timeout` 强杀（exit 124 即悬挂形态，判负），无"exit≠0 且无限速签名"的异常错误（判负）；单操作上界默认 480s，必须大于生产最坏重试链（≈376s），否则重试耗尽返回错误会被误判为悬挂；
+- **软断言**：慢速但成功（耗时 ≥ lowSpeedTime）归类 `recovered`（疑似重试自愈），按 `duration/lowSpeedTime` 折算疑似重试次数，仅记录不判负（大仓冷回源也存在慢速形态，需结合签名与趋势判读）；
+- **探针**：exit≠0 带限速签名（`curl: (28)` / `remote end hung up` / `early EOF` 等，签名正则与 TC-FEAT-GITCDN 一致）归类 `fail_fast`（快失败吸收证据，不判负）；violation 一律引用真实操作 label 并体现在判定分类与时间线；限速事件率（`fail_fast`/`recovered` 占比与分布）由看板跨运行统计收敛，单次运行遇不到限速不算失败；
+- **范围说明**：客户端视角无法直接计数 git-cdn 内部重试与上游请求次数，"疑似重试"由耗时形态推断并明确标注；不做服务端 /metrics 依赖与生产配置修改，不向下游超过正常用户并发形态加压。
 
 ---
 

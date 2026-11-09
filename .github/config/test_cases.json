@@ -208,6 +208,32 @@
       }
     },
     {
+      "id": "TC-FEAT-GITCDN-FAILFAST",
+      "name": "git-cdn 限速快失败与重试自愈（并发客户端时间线有界采样）",
+      "category": "platform-feature",
+      "feature_doc": "https://github.com/opensourceways/backlog/issues/2885",
+      "service_port": 8000,
+      "client": ["git"],
+      "workflow": ".github/workflows/e2e-feature-git-cdn-failfast.yml",
+      "engine_scenario": "git_cdn_failfast",
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
+      "target_clusters": "all",
+      "assertions": {
+        "hard": [
+          "用例注入与生产 configmap 一致的 https://github.com/ -> git-cdn insteadOf 重写（GIT_CONFIG_GLOBAL）并自检生效，clone 日志含 git-cdn 302 重定向证据",
+          "串行基座（ls-remote + 全量 clone）与并发采样流（默认 1 流 × 2 轮，dispatch 可调 1-3）全部操作有界结束：无 timeout 强杀（exit 124，悬挂形态判负）",
+          "exit≠0 且无限速签名的异常错误判负；violation 一律关联真实操作 label 并体现在判定分类",
+          "单操作上界默认 480s > 生产最坏重试链（≈(BACKOFF_COUNT+1)×lowSpeedTime+退避 ≈ 376s），保证重试耗尽返回错误不被误判为悬挂"
+        ],
+        "soft": [
+          "慢速但成功（耗时 ≥ lowSpeedTime）归类为疑似重试自愈，按 duration/lowSpeedTime 折算重试次数（信息项，不判负）"
+        ],
+        "probe": [
+          "限速签名操作（curl 28 / hung up 等）计为快失败吸收证据而非失败；限速事件率由看板跨运行统计收敛"
+        ]
+      }
+    },
+    {
       "id": "TC-SCHED-DUAL-LABEL",
       "name": "全 13 集群 Runner [型号, 区域] 双标签调度与芯片识别",
       "category": "runner-scheduling",

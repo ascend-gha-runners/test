@@ -8,6 +8,7 @@ on:
       - "e2e-feature-apt-cache"
       - "e2e-feature-crates-cache"
       - "e2e-feature-git-cdn"
+      - "e2e-feature-git-cdn-failfast"
       - "e2e-feature-git-lowspeed"
       - "e2e-feature-go-cache"
       - "e2e-feature-pypi-cache"
