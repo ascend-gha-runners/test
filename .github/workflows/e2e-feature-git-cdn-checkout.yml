@@ -218,15 +218,20 @@ jobs:
 
       # 形态对标 _selected_tests.yaml:142-147（cpu-ut / incident 同款）：
       # ref=<commit SHA> + fetch-depth: 0 = 按 SHA 全量 fetch，incident 中悬挂约 4 小时的操作形态；
-      # submodule（catlass）来自 gitcode.com 直连，不经 git-cdn，与生产行为一致
+      # submodule（catlass）来自 gitcode.com 直连，不经 git-cdn，与生产行为一致。
+      # 注意：本 workflow 在 ascend-gha-runners/test 仓库运行，必须显式指定 repository/path
+      # （生产 _selected_tests.yaml 跑在 vllm-ascend 仓库内故可省略；缺省会检出本仓库，
+      # 把 vllm-ascend 的 SHA 应用到本仓库触发 "not our ref"——实测踩中）
       - name: Checkout vllm-project/vllm-ascend repo
         id: ascend
         timeout-minutes: 35
         uses: actions/checkout@v7
         with:
+          repository: vllm-project/vllm-ascend
           ref: ${{ needs.matrix-setup.outputs.ascend_ref }}
           fetch-depth: 0
           submodules: ${{ inputs.submodules || 'true' }}
+          path: ./vllm-ascend
 
       - name: 判定与记录（慢速卡死 = 判负；有界慢速 = WARN）
         id: finish
@@ -282,7 +287,10 @@ jobs:
               'ascend_outcome': a_out,
               'timeout': timeout,
           }
-          with open(os.path.join(os.environ['RUNNER_TEMP'], f'checkout-round-{rnd}.json'), 'w') as fp:
+          # 写入 workspace（github.workspace）：RUNNER_TEMP 是 runner 运行时注入的
+          # 变量，不进 workflow 的 env context，${{ env.RUNNER_TEMP }} 渲染为空导致
+          # upload-artifact 静默上传空路径（实测踩中，artifact 缺失被 report 误判 MISSING）
+          with open(os.path.join(os.environ['GITHUB_WORKSPACE'], f'checkout-round-{rnd}.json'), 'w') as fp:
               json.dump(result, fp, ensure_ascii=False, indent=2)
           PY
         env:
@@ -294,9 +302,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gitcdn-checkout-round-${{ matrix.round }}
-          path: ${{ env.RUNNER_TEMP }}/checkout-round-${{ matrix.round }}.json
+          path: ${{ github.workspace }}/checkout-round-${{ matrix.round }}.json
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
 
   report:
     name: 汇总判定与可视化
