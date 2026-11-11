@@ -44,6 +44,7 @@ flowchart TD
 | [`TC-FEAT-GO`](#tc-feat-go) | Go modules 下载与运行 | [Go Cache (Port 8084)](https://ascend-gha-runners.github.io/docs/feature/) | 8084 (HTTP) | `go` | `e2e-feature-go-cache.yml` | golang:1.23-bookworm |
 | [`TC-FEAT-CRATES`](#tc-feat-crates) | crates.io Sparse Index 缓存 | [crates.io Cache (Port 8085)](https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085) | 8085 (HTTP) | `cargo` | `e2e-feature-crates-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-GITCDN`](#tc-feat-gitcdn) | git-cdn 回源限速保护与快失败 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `git` | `e2e-feature-git-cdn.yml` | openEuler CANN 8.2（root，HOME=/root） |
+| [`TC-FEAT-GITCDN-CHECKOUT`](#tc-feat-gitcdn-checkout) | 真实 actions/checkout 经 git-cdn 检出 | [backlog#2885](https://github.com/opensourceways/backlog/issues/2885) | 8000 (git smart HTTP) | `actions/checkout@v7` | `e2e-feature-git-cdn-checkout.yml` | openEuler CANN 8.2（hk-001 linux-amd64-cpu-2） |
 | [`TC-SCHED-DUAL-LABEL`](#tc-sched-dual-label) | 全 13 集群双标签调度与算力自检 | [Runner Pod 接入指导](https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod) | N/A | ARC Listener | `e2e-cluster-runners.yml` | Host Environment |
 | [`TC-PEP658-METADATA`](#tc-pep658-metadata) | PyTorch PEP 658 元数据完整性 | [PEP 658 Support](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `python`, `pip` | `e2e-cross-cluster-pep658.yml` | openEuler CANN 8.2 |
 
@@ -321,6 +322,48 @@ git -C repo fetch --no-tags origin "$SHA"   # incident 中悬挂 4h 的 fetch-by
 - **软断言**：单次 fetch-by-SHA 最坏耗时低于软阈值（默认 120s，超过仅 WARN 记录趋势，不判负——冷回源大 pack 属正常波动）；
 - **探针**：ambient gitconfig 重写存在性（HOME 与 /root 两侧分别记录，反映 fleet 差异，不判负）；gitcode 实例（`git-cdn-gitcode`）DNS 探针——sh-001/sh-002 未部署实例记 `not_applicable`，gy-001/wlcb-001 为 ExternalName 别名，均不判负；客户端 gitcode 重写存在性仅记录；
 - **统计口径**：单次运行全绿不能单独证明限速修复生效（限速是低概率随机事件）；该用例按"定时采样 × 多轮迭代"设计，故障率统计由看板（update-report-pages）跨运行聚合，结论以长期趋势为准。
+
+---
+
+### TC-FEAT-GITCDN-CHECKOUT
+
+#### 1. 基本信息
+- **用例 ID**：`TC-FEAT-GITCDN-CHECKOUT`
+- **名称**：真实 actions/checkout 经 git-cdn 检出（慢速卡死采样，Port 8000）
+- **官方文档**：[backlog#2885 git-cdn 加限速识别，快失败重试](https://github.com/opensourceways/backlog/issues/2885)
+- **参考形态**：vllm-project/vllm-ascend run 42972775223（job 130366214428，`.github/workflows/_selected_tests.yaml` cpu-ut job；实测 vllm 检出 12s、vllm-ascend 检出 45s）
+- **关联工作流**：`.github/workflows/e2e-feature-git-cdn-checkout.yml`
+- **执行范围**：仅手动触发；runner 固定 hk-001 `["linux-amd64-cpu-2", "hk-001"]`（runners.json 硬校验）；轮次 dispatch 可控（1-5，每轮一个 matrix job）
+- **默认执行镜像**：`swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11`（root / HOME=/root，pod postStart 的 ambient 重写可生效，仅记探针；显式 GIT_CONFIG_GLOBAL 注入为确定性兜底）
+- **关联 ADR**：[ADR-0008](adr/0008-真实checkout形态验证gitcdn检出慢速卡死.md)（判定语义：判负对象是"卡死"——超时强杀 / 检出失败 / 轮被工作流上界强杀，而非限速签名本身）
+
+#### 2. 测试目的
+1. 以 incident 的实际调用者形态——真实 `actions/checkout@v7`——验证 checkout 经 git-cdn 的效果：vllm 主仓按 ref 浅 fetch（对标 cpu-ut）+ vllm-ascend 按 commit SHA 全量 fetch（`fetch-depth: 0` = incident 中悬挂约 4 小时的操作形态）+ `submodules: recursive`；
+2. 检测慢速卡死：单轮（双 checkout）总耗时超上界即 `timeout_hang` 判负，checkout 失败判负，轮被工作流 40min 上界强杀（artifact 缺失 = MISSING）判负；有界慢速仅 WARN；
+3. 轮次可控的人工验证入口：指定 ref、指定轮次、固定单集群，用于 incident 复盘与修复灰度验证（长期统计收敛仍由 TC-FEAT-GITCDN 定时采样 + 看板承担）。
+
+#### 3. 生产标准使用方式（对标 vllm-project/vllm-ascend cpu-ut）
+```yaml
+# 生产形态（_selected_tests.yaml cpu-ut job，经 runner pod 的 insteadOf 重写走 git-cdn）：
+- name: Checkout vllm-project/vllm repo
+  uses: actions/checkout@v7
+  with:
+    repository: vllm-project/vllm
+    ref: <release tag 或 main commit>     # 默认浅 fetch
+    path: ./vllm-empty
+- name: Checkout vllm-project/vllm-ascend repo
+  uses: actions/checkout@v7
+  with:
+    ref: <PR head commit SHA>             # 按 SHA fetch = incident 悬挂形态
+    fetch-depth: 0                        # 全量
+    submodules: recursive                 # catlass 来自 gitcode 直连，不经 git-cdn
+```
+
+#### 4. 判定标准
+- **硬断言**：runner 双标签硬校验存在；GIT_CONFIG_GLOBAL 注入重写自检生效 + ls-remote 真实客户端含 git-cdn 302 重定向证据；每轮强制清空 workspace（self-hosted 默认不清理，保证冷检出形态可比）；单轮总耗时 ≤ 上界（默认 900s，dispatch 120-1800）且两个 checkout step 均 success；
+- **软断言**：有界慢速（总耗时超软阈值 300s 但在上界内）仅 WARN 记趋势（冷回源大仓全量属正常波动）；
+- **探针**：分项计时（vllm / vllm-ascend）对标生产实测 12s / 45s 基线；ambient gitconfig 重写存在性（HOME=/root 时 pod postStart 注入亦生效）不判负；
+- **范围说明**：固定 hk-001 单集群 + 手动触发，定位人工验证入口；13 集群长期采样与限速事件率统计由 TC-FEAT-GITCDN 与看板承担；submodule（gitcode.com/cann/catlass）不经 git-cdn，与生产行为一致。
 
 ---
 
