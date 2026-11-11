@@ -287,7 +287,10 @@ jobs:
               'ascend_outcome': a_out,
               'timeout': timeout,
           }
-          with open(os.path.join(os.environ['RUNNER_TEMP'], f'checkout-round-{rnd}.json'), 'w') as fp:
+          # 写入 workspace（github.workspace）：RUNNER_TEMP 是 runner 运行时注入的
+          # 变量，不进 workflow 的 env context，${{ env.RUNNER_TEMP }} 渲染为空导致
+          # upload-artifact 静默上传空路径（实测踩中，artifact 缺失被 report 误判 MISSING）
+          with open(os.path.join(os.environ['GITHUB_WORKSPACE'], f'checkout-round-{rnd}.json'), 'w') as fp:
               json.dump(result, fp, ensure_ascii=False, indent=2)
           PY
         env:
@@ -299,9 +302,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gitcdn-checkout-round-${{ matrix.round }}
-          path: ${{ env.RUNNER_TEMP }}/checkout-round-${{ matrix.round }}.json
+          path: ${{ github.workspace }}/checkout-round-${{ matrix.round }}.json
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
 
   report:
     name: 汇总判定与可视化
