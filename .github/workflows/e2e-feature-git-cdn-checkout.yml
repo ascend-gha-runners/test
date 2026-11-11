@@ -1,0 +1,371 @@
+name: e2e-feature-git-cdn-checkout
+# 真实 actions/checkout 经 git-cdn 检出验证（慢速卡死采样）— opensourceways/backlog#2885
+#
+# 参考形态：vllm-project/vllm-ascend run 42972775223 / job 130366214428
+# （.github/workflows/_selected_tests.yaml 的 cpu-ut job）：
+#   1. Checkout vllm-project/vllm repo：checkout@v7 + repository + ref + path（默认浅 fetch）
+#   2. Checkout vllm-project/vllm-ascend repo：checkout@v7 + ref=<commit SHA> + fetch-depth: 0
+#      + submodules: recursive —— 按 SHA 全量 fetch 正是 incident（run 41602861604）中
+#      在 git-cdn 限速流上悬挂约 4 小时的操作形态。
+#
+# 判定语义（判负卡死，不判负限速）：判负对象是"卡死"（轮耗时超上界 / checkout 失败 / 轮被工作流
+# 上界强杀），而不是限速签名本身；慢速但有界完成记 WARN 趋势。
+# 轮次由 dispatch 参数控制（1-5，每轮一个 matrix job），仅手动触发；runner 固定
+# hk-001 的 linux-amd64-cpu-2（双标签 AND 钉死，不得编造标签）。
+# git-cdn 流量路径证据链：GIT_CONFIG_GLOBAL 注入与生产 configmap postStart 一致的
+# insteadOf 重写并自检生效（硬）+ ls-remote 重定向证据（硬）；CANN 容器 root/HOME=/root
+# 下 ambient 注入亦可生效，仅记探针。
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "checkout 采样轮次 (1-5，默认 3；每轮一个 matrix job，冷检出形态)"
+        required: false
+        default: "3"
+        type: string
+      checkout_timeout_seconds:
+        description: "单轮（双 checkout）耗时上界秒数 (120-1800，默认 900；超界=慢速卡死判负)"
+        required: false
+        default: "900"
+        type: string
+      ascend_ref:
+        description: "vllm-ascend 的 ref（默认空 = 最新 main commit SHA，即 incident 的 fetch-by-SHA 形态）"
+        required: false
+        default: ""
+        type: string
+      vllm_ref:
+        description: "vllm 主仓的 ref（默认空 = 最新 main commit SHA；生产 cpu-ut 用 release tag/commit）"
+        required: false
+        default: ""
+        type: string
+      submodules:
+        description: "vllm-ascend 检出是否 recursive 拉 submodule（默认 true，对标 cpu-ut；catlass 来自 gitcode 直连不经 git-cdn）"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+env:
+  GIT_CDN_HOST: git-cdn-service.git-cdn.svc.cluster.local
+  # 固定消息语言，故障签名 grep 才可靠
+  LC_ALL: C
+  # 软阈值：单轮总耗时超过即 WARN 记趋势（实测生产 cpu-ut：vllm 12s + vllm-ascend 45s）
+  SOFT_WARN_SECONDS: "300"
+
+jobs:
+  matrix-setup:
+    name: 解析轮次矩阵与 ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      rounds: ${{ steps.set-matrix.outputs.rounds }}
+      timeout: ${{ steps.set-matrix.outputs.timeout }}
+      ascend_ref: ${{ steps.refs.outputs.ascend_ref }}
+      vllm_ref: ${{ steps.refs.outputs.vllm_ref }}
+    steps:
+      - name: 检出测试仓库
+        uses: actions/checkout@v4
+
+      - name: 校验 runner 存在、钳制参数与轮次矩阵
+        id: set-matrix
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+          CHECKOUT_TIMEOUT: ${{ inputs.checkout_timeout_seconds }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          # runner 硬校验：hk-001 的 linux-amd64-cpu-2 必须按双标签登记（不得编造标签）
+          with open('.github/config/runners.json') as fp:
+              runners = json.load(fp)['runners']
+          hits = [r for r in runners
+                  if r['cluster'] == 'hk-001' and r['labels'] == ['linux-amd64-cpu-2', 'hk-001']]
+          if len(hits) != 1:
+              raise SystemExit(f'runners.json 中 hk-001/linux-amd64-cpu-2 双标签 Runner 异常: {hits}')
+
+          def clamp(name, default, lo, hi):
+              try:
+                  v = int(os.environ.get(name, ''))
+              except ValueError:
+                  v = default
+              return max(lo, min(hi, v))
+
+          rounds = clamp('ITERATIONS', 3, 1, 5)
+          timeout = clamp('CHECKOUT_TIMEOUT', 900, 120, 1800)
+          matrix = json.dumps({'include': [{'round': i} for i in range(1, rounds + 1)]},
+                              separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fp:
+              fp.write(f'matrix={matrix}\n')
+              fp.write(f'rounds={rounds}\n')
+              fp.write(f'timeout={timeout}\n')
+          print(f'rounds={rounds} timeout={timeout}s runner={hits[0]["name"]} labels={hits[0]["labels"]}')
+          PY
+
+      - name: 解析被测 ref（默认最新 main commit SHA）
+        id: refs
+        run: |
+          set -euo pipefail
+          # 云 runner 直连 github 可达，无需镜像代理；SHA 形态保证 fetch-by-SHA（incident 形态）
+          ascend_ref="${{ inputs.ascend_ref }}"
+          if [ -z "$ascend_ref" ]; then
+            ascend_ref=$(git ls-remote https://github.com/vllm-project/vllm-ascend refs/heads/main | cut -f1)
+            echo "ascend_ref 未指定，取最新 main SHA: $ascend_ref"
+          fi
+          vllm_ref="${{ inputs.vllm_ref }}"
+          if [ -z "$vllm_ref" ]; then
+            vllm_ref=$(git ls-remote https://github.com/vllm-project/vllm refs/heads/main | cut -f1)
+            echo "vllm_ref 未指定，取最新 main SHA: $vllm_ref"
+          fi
+          case "$ascend_ref$vllm_ref" in
+            *[!0-9a-f]*) echo "::warning::ref 含非 hex 字符（分支/标签名亦可，SHA 才是 incident 形态）" ;;
+          esac
+          {
+            echo "ascend_ref=$ascend_ref"
+            echo "vllm_ref=$vllm_ref"
+          } >> "$GITHUB_OUTPUT"
+
+  checkout-probe:
+    name: "checkout round ${{ matrix.round }} (hk-001)"
+    needs: matrix-setup
+    runs-on: ["linux-amd64-cpu-2", "hk-001"]
+    # 工作流级硬上界：被测对象就是"慢速卡死"，作业本身必须永不悬挂；
+    # 40min > 最大参数 1800s + 容器启动与 submodule 余量
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix-setup.outputs.matrix) }}
+    # CANN 容器（root / HOME=/root，与 git-cdn 特性用例同款）：pod template postStart
+    # 写入 /root/.gitconfig 的 git-cdn 重写在该容器内即为生效全局配置（ambient 可见）；
+    # 显式 GIT_CONFIG_GLOBAL 注入仍为确定性兜底
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      ROUND: ${{ matrix.round }}
+      CHECKOUT_TIMEOUT: ${{ needs.matrix-setup.outputs.timeout }}
+      ASCEND_REF: ${{ needs.matrix-setup.outputs.ascend_ref }}
+      VLLM_REF: ${{ needs.matrix-setup.outputs.vllm_ref }}
+    steps:
+      # self-hosted runner 默认不清理 workspace：残留检出会把"冷检出"变成增量 fetch，
+      # 耗时失真。每轮开始强制清空，保证轮间形态一致
+      - name: 清理 workspace 并建立计时与 git-cdn 注入
+        id: setup
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* 2>/dev/null || true
+          for cmd in git python3 timeout getent; do
+            command -v "$cmd" >/dev/null || { echo "::error::缺少工具 $cmd"; exit 1; }
+          done
+          git --version
+          date +%s > "$RUNNER_TEMP/round.t0"
+          # 集群内 git-cdn DNS 可解析（硬断言）
+          if ! getent hosts "$GIT_CDN_HOST" >/dev/null; then
+            echo "::error::${GIT_CDN_HOST} DNS 解析失败"; exit 1
+          fi
+          # 与生产 configmap postStart 完全一致的 insteadOf 重写（消除 fleet HOME 差异）
+          cat > "$RUNNER_TEMP/gitconfig" <<EOF
+          [url "http://${GIT_CDN_HOST}:8000/"]
+              insteadOf = https://github.com/
+          EOF
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          # 注入自检（硬断言）：checkout 的 git 子进程将继承本 env
+          if ! git config --global --get-regexp 'insteadof' 2>/dev/null | grep -qF "$GIT_CDN_HOST"; then
+            echo "::error::注入的 GIT_CONFIG_GLOBAL 未生效（未读出 ${GIT_CDN_HOST} insteadOf）"
+            exit 1
+          fi
+          echo "injected rewrite: $(git config --global --get-regexp 'insteadof' | head -1)"
+          # ambient 探针（不判负）：fleet HOME=/root 时 pod postStart 注入亦生效
+          if [ -f /root/.gitconfig ] && grep -qF "$GIT_CDN_HOST" /root/.gitconfig 2>/dev/null; then
+            echo "ambient=/root_gitcdn"
+          else
+            echo "ambient=absent"
+          fi
+          # 真实 git 客户端连通 + 重定向证据（硬断言；curl 探针会因 302 丢 query 退化 dumb 403，不采用）
+          lsr=$(mktemp); rc=0
+          timeout 60 git ls-remote https://github.com/vllm-project/vllm-ascend refs/heads/main >"$lsr" 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::ls-remote 经 git-cdn 失败 rc=$rc：$(tail -n 3 "$lsr")"; exit 1
+          fi
+          grep -F "redirecting to http://${GIT_CDN_HOST}" "$lsr" >/dev/null || {
+            echo "::error::ls-remote 日志缺少 git-cdn 重定向证据，无法证明流量经过 git-cdn"; exit 1
+          }
+          echo "ls-remote OK，重定向证据成立；被测 ref: ASCEND_REF=$ASCEND_REF VLLM_REF=$VLLM_REF"
+
+      # —— 计时标记步：分项记录 vllm / vllm-ascend 两个 checkout 的耗时（对标生产实测 12s / 45s）——
+      - name: 计时标记 t1（vllm 检出前）
+        run: date +%s > "$RUNNER_TEMP/round.t1"
+
+      # 形态对标 _selected_tests.yaml:129-134（cpu-ut 同款）：repository + ref + path，默认浅 fetch
+      - name: Checkout vllm-project/vllm repo
+        id: vllm
+        timeout-minutes: 10
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ needs.matrix-setup.outputs.vllm_ref }}
+          path: ./vllm-empty
+
+      - name: 计时标记 t2（vllm-ascend 检出前）
+        run: date +%s > "$RUNNER_TEMP/round.t2"
+
+      # 形态对标 _selected_tests.yaml:142-147（cpu-ut / incident 同款）：
+      # ref=<commit SHA> + fetch-depth: 0 = 按 SHA 全量 fetch，incident 中悬挂约 4 小时的操作形态；
+      # submodule（catlass）来自 gitcode.com 直连，不经 git-cdn，与生产行为一致
+      - name: Checkout vllm-project/vllm-ascend repo
+        id: ascend
+        timeout-minutes: 35
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.matrix-setup.outputs.ascend_ref }}
+          fetch-depth: 0
+          submodules: ${{ inputs.submodules || 'true' }}
+
+      - name: 判定与记录（慢速卡死 = 判负；有界慢速 = WARN）
+        id: finish
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+
+          def read_t(name):
+              try:
+                  return int(open(os.path.join(os.environ['RUNNER_TEMP'], name)).read().strip())
+              except (OSError, ValueError):
+                  return None
+
+          # t0=setup 完成，t1=vllm 检出前，t2=ascend 检出前（= vllm 结束），finish 即总终点
+          t0, t1, t2 = read_t('round.t0'), read_t('round.t1'), read_t('round.t2')
+          now = int(time.time())
+          vllm_dur = (t2 - t1) if (t1 is not None and t2 is not None) else -1
+          ascend_dur = (now - t2) if t2 is not None else -1
+          total = (now - t0) if t0 is not None else -1
+
+          v_out = os.environ.get('V_OUT', 'skipped')
+          a_out = os.environ.get('A_OUT', 'skipped')
+          timeout = int(os.environ.get('CHECKOUT_TIMEOUT', '900'))
+          soft = int(os.environ.get('SOFT_WARN_SECONDS', '300'))
+          rnd = os.environ.get('ROUND', '0')
+
+          verdict = 'pass'
+          notes = []
+          if total < 0 or t0 is None:
+              verdict, notes = 'no_record', ['计时标记缺失（setup 失败或轮被强杀）']
+          elif v_out != 'success' or a_out != 'success':
+              verdict, notes = 'checkout_failed', [f'vllm={v_out} ascend={a_out}（检出失败判负）']
+          elif total > timeout:
+              verdict, notes = 'timeout_hang', [f'总耗时 {total}s > 上界 {timeout}s（慢速卡死形态判负）']
+          elif total > soft:
+              notes = [f'总耗时 {total}s 超软阈值 {soft}s（有界慢速，WARN 趋势，不判负）']
+
+          print(f'round={rnd} vllm={vllm_dur}s ascend={ascend_dur}s total={total}s verdict={verdict} v_out={v_out} a_out={a_out}')
+          for n in notes:
+              print(f'::{"warning::" if verdict == "pass" else "error::"}[round {rnd}] {n}')
+
+          result = {
+              'round': int(rnd),
+              'vllm_seconds': vllm_dur,
+              'ascend_seconds': ascend_dur,
+              'total_seconds': total,
+              'verdict': verdict,
+              'vllm_outcome': v_out,
+              'ascend_outcome': a_out,
+              'timeout': timeout,
+          }
+          with open(os.path.join(os.environ['RUNNER_TEMP'], f'checkout-round-{rnd}.json'), 'w') as fp:
+              json.dump(result, fp, ensure_ascii=False, indent=2)
+          PY
+        env:
+          V_OUT: ${{ steps.vllm.outcome }}
+          A_OUT: ${{ steps.ascend.outcome }}
+
+      - name: Upload round result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitcdn-checkout-round-${{ matrix.round }}
+          path: ${{ env.RUNNER_TEMP }}/checkout-round-${{ matrix.round }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  report:
+    name: 汇总判定与可视化
+    needs: [matrix-setup, checkout-probe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 下载各轮结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gitcdn-checkout-round-*
+          path: rounds
+          merge-multiple: false
+
+      - name: 汇总判定
+        run: |
+          set -euo pipefail
+          # 若某轮被 job 级 timeout 强杀，其 artifact 缺失——按 hang 判负处理
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          rounds_expected = int(os.environ['ROUNDS'])
+          timeout = int(os.environ['CHECKOUT_TIMEOUT'])
+          files = sorted(glob.glob('rounds/*/checkout-round-*.json'))
+          results = {json.load(open(f))['round']: json.load(open(f)) for f in files}
+
+          md = [f'## git-cdn checkout 慢速卡死验证（{rounds_expected} 轮，hk-001 linux-amd64-cpu-2）', '',
+                '形态对标 vllm-ascend cpu-ut（checkout@v7）：vllm 按 ref 浅 fetch + '
+                'vllm-ascend 按 commit SHA 全量 fetch（incident 悬挂形态）+ recursive submodule。', '',
+                '| 轮次 | vllm 检出 | ascend 检出(全量) | 总耗时 | 判定 |', '|---|---|---|---|---|']
+          fails, warns = [], []
+          max_total = 0
+          for i in range(1, rounds_expected + 1):
+              r = results.get(i)
+              if r is None:
+                  md.append(f'| round {i} | - | - | - | **MISSING**（轮被工作流上界强杀=卡死判负） |')
+                  fails.append(i)
+                  continue
+              total = r['total_seconds']
+              max_total = max(max_total, total or 0)
+              bar = '▇' * max(1, round((total or 0) / max(timeout, max_total, 1) * 30))
+              md.append(f'| round {i} | {r["vllm_seconds"]}s | {r["ascend_seconds"]}s '
+                        f'| {total}s `{bar}` | {r["verdict"]} |')
+              if r['verdict'] in ('timeout_hang', 'checkout_failed', 'no_record'):
+                  fails.append(i)
+              elif r['verdict'] == 'pass' and (r['total_seconds'] or 0) > int(os.environ.get('SOFT_WARN_SECONDS', '300')):
+                  warns.append(i)
+
+          md += ['', f'最坏轮总耗时 **{max_total}s**（incident 基线为小时级悬挂；'
+                     f'生产 cpu-ut 实测 vllm 12s + ascend 45s ≈ 57s）', '']
+          if fails:
+              md.append(f'**结论：FAIL** — 卡死/失败轮次: {fails}（慢速卡死或检出失败）')
+          elif warns:
+              md.append(f'**结论：PASS（有界慢速告警）** — 超软阈值轮次: {warns}，未出现卡死形态')
+          else:
+              md.append('**结论：PASS** — 全部轮次在上界内完成，无慢速卡死形态')
+
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as fp:
+                  fp.write('\n'.join(md) + '\n')
+
+          if fails:
+              print(f'::error::checkout 经 git-cdn 出现慢速卡死/失败轮次: {fails}')
+              raise SystemExit(1)
+          PY
+        env:
+          ROUNDS: ${{ needs.matrix-setup.outputs.rounds }}
+          CHECKOUT_TIMEOUT: ${{ needs.matrix-setup.outputs.timeout }}
+          SOFT_WARN_SECONDS: "300"

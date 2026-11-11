@@ -90,6 +90,7 @@ Agent 在执行不同任务时，请依照以下路径逐步加载上下文：
 | [`e2e-feature-go-cache.yml`](.github/workflows/e2e-feature-go-cache.yml) | Port 8084 (HTTP) | 人工单集群、冷缓存下载固定 Go module、go.sum 校验、编译执行及客户端恢复 |
 | [`e2e-feature-crates-cache.yml`](.github/workflows/e2e-feature-crates-cache.yml) | Port 8085 (HTTP) | gy-006 已审查入口、Cargo sparse 冷缓存拉取固定 `anyhow`、编译执行、清除产物后离线重建 |
 | [`e2e-feature-git-cdn.yml`](.github/workflows/e2e-feature-git-cdn.yml) | Port 8000 (git smart HTTP) | 13 集群 git-cdn 回源限速保护（ADR-0005）：真实 git 序列（clone / ls-remote / fetch-by-SHA）时间上界 + 故障签名断言，定时采样统计限速故障率 |
+| [`e2e-feature-git-cdn-checkout.yml`](.github/workflows/e2e-feature-git-cdn-checkout.yml) | Port 8000 (git smart HTTP) | 真实 actions/checkout@v7 经 git-cdn 检出慢速卡死验证（ADR-0008）：完全对标 vllm-ascend cpu-ut 形态（vllm 浅 fetch + vllm-ascend 按 SHA 全量 + submodule），轮次 dispatch 可控（1-5），固定 hk-001 linux-amd64-cpu-2，仅手动触发；判负对象是卡死而非限速签名 |
 
 ### 常用运行命令
 ```bash
@@ -100,6 +101,7 @@ gh workflow run e2e-feature-rustup-cache.yml --repo ascend-gha-runners/test
 gh workflow run e2e-feature-yum-cache.yml    --repo ascend-gha-runners/test
 gh workflow run e2e-feature-crates-cache.yml --repo ascend-gha-runners/test
 gh workflow run e2e-feature-git-cdn.yml      --repo ascend-gha-runners/test
+gh workflow run e2e-feature-git-cdn-checkout.yml --repo ascend-gha-runners/test -f iterations=3
 
 # 全集群 Runner 联通性与双标签验证
 gh workflow run e2e-cluster-runners.yml      --repo ascend-gha-runners/test
