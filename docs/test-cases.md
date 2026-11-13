@@ -122,7 +122,7 @@ uv pip install --no-cache "torch>=2.4.0,<2.4.99"
 
 #### 1. 目的与范围
 
-在 `mind-third-ci` 的 CPU GitHub Actions Runner 内，绕过 HTTP 代理和本地包缓存，比较公共 PyPI 镜像下载的稳定性与吞吐。该测试用于镜像源选型和网络故障排查，**不代替 `TC-FEAT-PYPI` 缓存功能 E2E**。
+在 `runners.json` 所列的全部 13 个集群各选择一个 GitHub Actions Runner，绕过 HTTP 代理和本地包缓存，比较公共 PyPI 镜像下载的稳定性与吞吐。优先使用 CPU Runner；未配置 CPU Runner 时使用现有 NPU Runner。该测试用于镜像源选型和网络故障排查，**不代替 `TC-FEAT-PYPI` 缓存功能 E2E**。
 
 - 商业：Huawei、Tencent、Aliyun、Volcengine。
 - 教育机构：TUNA、USTC、SJTU、NJU、BFSU。
@@ -134,16 +134,19 @@ uv pip install --no-cache "torch>=2.4.0,<2.4.99"
 
 #### 2. 执行策略
 
-- 定时（每天 UTC 18:40）：仅 small wheel，1 路、每镜像 3 次，低流量采样。
-- 手动 `availability`：与定时配置相同。
-- 手动 `bandwidth`：三种 wheel、并发 1/4/8、每组 8 次，总下载量可能超过 10 GiB；不自动运行，不使用 NPU。
-- Workflow：`.github/workflows/e2e-feature-pypi-mirror.yml`；引擎：`scripts/pypi_mirror_benchmark.py`；结果：`pypi-mirror-benchmark` artifact（`samples.csv`、`summary.json`）。
+- 定时（每天 UTC 18:40）：覆盖全部 13 集群；每个集群仅 small wheel、1 路、每镜像 3 次，低流量采样。
+- 手动 `availability`：与定时配置相同；可通过 `cluster` 参数选择单个集群排障，默认 `all`。
+- 手动 `bandwidth`：三种 wheel、并发 1/4/8、每镜像每文件/并发组共 8 次。单集群总下载量可能超过 10 GiB；`cluster=all` 可产生百 GiB 级流量，只能手动触发。无 CPU Runner 的集群需占用其现有 NPU Runner。
+- 调度：`scripts/select_pypi_runner_matrix.py` 按 `.github/config/runners.json` 为每集群选择一个 Runner；全局最多同时运行 2 个集群任务。当前配置 8 个 CPU 优先、5 个 NPU 兜底。
+- Workflow：`.github/workflows/e2e-feature-pypi-mirror.yml`；引擎：`scripts/pypi_mirror_benchmark.py`；每个集群独立上传 `pypi-mirror-<cluster>` artifact（`samples.csv`、`summary.json`）。
 
 手动触发：
 
 ```bash
-gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=availability
-gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=bandwidth
+gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=availability -f cluster=all
+# 先在单个集群验证带宽，避免无意中对所有集群施加大流量
+gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=bandwidth -f cluster=mind-third-ci
+# 需要全部集群带宽对照时，再显式传入 -f cluster=all
 ```
 
 #### 3. 判定与输出
@@ -152,7 +155,8 @@ gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f pr
 - **软断言**：单镜像成功率、P90（所有请求，包含失败耗时）、成功下载中位速率、并发有效吞吐、SHA256 完整性，保持原始记录；公网镜像失败不直接判平台功能失败。
 - **探针**：索引不可达、文件未同步、缺少 `#sha256` 或各镜像哈希不一致，标记 `not_verified`/原因，不能当作下载成功。
 - **数据契约**：每条记录包含镜像、目标 IP、HTTP 状态、curl 退出码、字节数、连接耗时、首字节耗时、总耗时、有效 URL 和 SHA256 结果；工作流摘要提供各组聚合统计。
-- **展示边界**：现有 Pages 自动展示本工作流的 Job 状态和历史通过率；详细带宽指标暂通过 artifact 与 Step Summary 查看，尚未作为首页历史指标展示。
+- **展示边界**：现有 Pages 通过每个 Benchmark Job 的名称识别并展示 13 个集群的状态；逐镜像详细带宽指标暂通过各集群 artifact 与 Step Summary 查看，尚未作为首页历史指标展示。
+- **执行/结果分离**：镜像超时、未同步和哈希不匹配均记录在样本结果中，不自动将相应 Job 标记为平台 E2E 失败；但测试运行环境错误应导致 Job 失败。
 
 ---
 
