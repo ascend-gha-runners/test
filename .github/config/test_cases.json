@@ -42,7 +42,7 @@
       "workflow": ".github/workflows/e2e-feature-pypi-mirror.yml",
       "engine_scenario": "pypi_mirror_benchmark",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": ["mind-third-ci"],
+      "target_clusters": "all",
       "assertions": {
         "hard": ["本地执行环境具备 python3 与 curl，脚本产出 samples.csv 和 summary.json"],
         "soft": ["采集镜像成功率、P90 下载耗时、SHA256、单连接速率和并发有效吞吐；公网波动不判定平台功能失败"],
