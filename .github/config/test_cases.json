@@ -9,7 +9,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80",
       "service_port": 80,
-      "client": ["pip", "uv"],
+      "client": [
+        "pip",
+        "uv"
+      ],
       "workflow": ".github/workflows/e2e-feature-pypi-cache.yml",
       "engine_scenario": "pypi",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -33,12 +36,42 @@
       }
     },
     {
+      "id": "TC-FEAT-PYPI-MIRROR",
+      "name": "PyPI 公共镜像稳定性与下载吞吐（Runner 直连）",
+      "category": "platform-feature",
+      "feature_doc": "https://github.com/ascend-gha-runners/test/blob/main/docs/test-cases.md#tc-feat-pypi-mirror",
+      "service_port": null,
+      "client": [
+        "curl"
+      ],
+      "workflow": ".github/workflows/e2e-feature-pypi-mirror.yml",
+      "engine_scenario": "pypi_mirror_benchmark",
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
+      "target_clusters": [
+        "mind-third-ci"
+      ],
+      "assertions": {
+        "hard": [
+          "本地执行环境具备 python3 与 curl，脚本产出 samples.csv 和 summary.json"
+        ],
+        "soft": [
+          "采集各源 wheel 下载成功率、P90 全请求耗时、SHA256 完整性、单连接速度与并发有效吞吐；不以公网波动判定平台功能失败"
+        ],
+        "probe": [
+          "索引缺失、镜像未同步或 SHA256 未公布标记未验证，不记为成功",
+          "测试为 Runner 直连出口，不代表 squid-cache Pod 回源路径"
+        ]
+      }
+    },
+    {
       "id": "TC-FEAT-APT",
       "name": "Ubuntu APT 镜像缓存服务",
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#apt-cache-port-8081",
       "service_port": 8081,
-      "client": ["apt-get"],
+      "client": [
+        "apt-get"
+      ],
       "workflow": ".github/workflows/e2e-feature-apt-cache.yml",
       "engine_scenario": "apt",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12",
@@ -62,7 +95,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#rust-rustup-cache-port-8082",
       "service_port": 8082,
-      "client": ["rustup", "curl"],
+      "client": [
+        "rustup",
+        "curl"
+      ],
       "workflow": ".github/workflows/e2e-feature-rustup-cache.yml",
       "engine_scenario": "rustup",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -87,7 +123,10 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083",
       "service_port": 8083,
-      "client": ["dnf", "yum"],
+      "client": [
+        "dnf",
+        "yum"
+      ],
       "workflow": ".github/workflows/e2e-feature-yum-cache.yml",
       "engine_scenario": "yum",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -111,11 +150,15 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#cratesio-cache-port-8085",
       "service_port": 8085,
-      "client": ["cargo"],
+      "client": [
+        "cargo"
+      ],
       "workflow": ".github/workflows/e2e-feature-crates-cache.yml",
       "engine_scenario": "crates",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": ["gy-006"],
+      "target_clusters": [
+        "gy-006"
+      ],
       "assertions": {
         "hard": [
           "config.json 中 dl 路径重写为内网 8085 缓存服务",
@@ -138,7 +181,9 @@
       "category": "platform-feature",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/",
       "service_port": 8084,
-      "client": ["go"],
+      "client": [
+        "go"
+      ],
       "workflow": ".github/workflows/e2e-feature-go-cache.yml",
       "engine_scenario": "go",
       "default_container": "golang:1.23-bookworm",
@@ -151,8 +196,12 @@
           "独立空缓存 loopback 故障代理后由内网备用代理真实下载并运行",
           "真实模块 HTTP 200 与 X-Go-Cache 响应头"
         ],
-        "soft": ["第二次请求 HIT"],
-        "probe": ["虚构模块 HTTP 404；nginx 回源层级无证据为 not_verified"]
+        "soft": [
+          "第二次请求 HIT"
+        ],
+        "probe": [
+          "虚构模块 HTTP 404；nginx 回源层级无证据为 not_verified"
+        ]
       }
     },
     {
@@ -161,7 +210,9 @@
       "category": "platform-feature",
       "feature_doc": "https://github.com/opensourceways/backlog/issues/2885",
       "service_port": 8000,
-      "client": ["git"],
+      "client": [
+        "git"
+      ],
       "workflow": ".github/workflows/e2e-feature-git-cdn.yml",
       "engine_scenario": "git_cdn",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
@@ -189,11 +240,15 @@
       "category": "platform-feature",
       "feature_doc": "https://github.com/opensourceways/backlog/issues/2885",
       "service_port": 8000,
-      "client": ["actions/checkout@v7"],
+      "client": [
+        "actions/checkout@v7"
+      ],
       "workflow": ".github/workflows/e2e-feature-git-cdn-checkout.yml",
       "engine_scenario": "git_cdn_checkout",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
-      "target_clusters": ["hk-001"],
+      "target_clusters": [
+        "hk-001"
+      ],
       "assertions": {
         "hard": [
           "checkout 形态完全对标 vllm-ascend cpu-ut（_selected_tests.yaml）：vllm 主仓 repository+ref+path 浅 fetch，vllm-ascend 按 commit SHA + fetch-depth: 0 + submodules: recursive（incident 悬挂形态）",
@@ -214,7 +269,9 @@
       "category": "runner-scheduling",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/user-manual-gha-zh/#runner-pod",
       "service_port": null,
-      "client": ["gha-runner-scale-set"],
+      "client": [
+        "gha-runner-scale-set"
+      ],
       "workflow": ".github/workflows/e2e-cluster-runners.yml",
       "engine_scenario": "cluster_runners",
       "default_container": null,
@@ -239,7 +296,10 @@
       "category": "index-integrity",
       "feature_doc": "https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80",
       "service_port": 80,
-      "client": ["python", "pip"],
+      "client": [
+        "python",
+        "pip"
+      ],
       "workflow": ".github/workflows/e2e-cross-cluster-pep658.yml",
       "engine_scenario": "pep658",
       "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
