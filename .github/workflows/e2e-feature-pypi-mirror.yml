@@ -1,0 +1,67 @@
+name: e2e-feature-pypi-mirror
+
+# Benchmarks public mirror origins from the mind-third CI RUNNER egress.
+# It bypasses HTTP proxies and caches. This is NOT the Squid-pod egress.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "availability: lightweight small-wheel probe; bandwidth: large-wheel 1/4/8 concurrency"
+        type: choice
+        required: true
+        default: availability
+        options:
+          - availability
+          - bandwidth
+  schedule:
+    # Daily small-wheel stability sample; heavy downloads remain opt-in.
+    - cron: "40 18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-mirror-benchmark-mind-third
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: "PyPI mirrors / mind-third-ci / runner egress"
+    runs-on: ["linux-amd64-cpu-2", "mind-third-ci"]
+    timeout-minutes: 90
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      BENCH_CLUSTER: mind-third-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check benchmark requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          command -v curl
+          python3 --version
+          curl --version | head -n 1
+
+      - name: Probe mirror reliability and throughput
+        shell: bash
+        env:
+          BENCH_PROFILE: ${{ inputs.profile || 'availability' }}
+        run: |
+          set -euo pipefail
+          if [[ "$BENCH_PROFILE" == "bandwidth" ]]; then
+            python3 scripts/pypi_mirror_benchmark.py               --sizes small,medium,large --concurrency 1,4,8               --requests 8 --timeout 120 --output-dir benchmark-results
+          else
+            python3 scripts/pypi_mirror_benchmark.py               --sizes small --concurrency 1               --requests 3 --timeout 15 --output-dir benchmark-results
+          fi
+
+      - name: Upload mirror samples and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-mirror-benchmark
+          path: benchmark-results/
+          retention-days: 30
+          if-no-files-found: warn
