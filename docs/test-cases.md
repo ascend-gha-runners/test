@@ -38,6 +38,7 @@ flowchart TD
 | 用例 ID | 特性 / 场景名称 | 官方文档小节 | 代理端口 / 协议 | 适用客户端 | 关联工作流 | 默认镜像 |
 |---|---|---|---|---|---|---|
 | [`TC-FEAT-PYPI`](#tc-feat-pypi) | PyPI & PyTorch Wheels 缓存 | [PyPI Cache (Port 80)](https://ascend-gha-runners.github.io/docs/feature/#pypi-cache-port-80) | 80 (HTTP) | `pip`, `uv` | `e2e-feature-pypi-cache.yml` | openEuler CANN 8.2 |
+| [`TC-FEAT-PYPI-MIRROR`](#tc-feat-pypi-mirror) | 公共 PyPI 镜像网络质量基准 | [本用例](#tc-feat-pypi-mirror) | 直连 HTTPS | `curl` | `e2e-feature-pypi-mirror.yml` | openEuler CANN 8.2（mind-third CPU） |
 | [`TC-FEAT-APT`](#tc-feat-apt) | Ubuntu APT 镜像缓存 | [APT Cache (Port 8081)](https://ascend-gha-runners.github.io/docs/feature/#apt-cache-port-8081) | 8081 (HTTP) | `apt-get` | `e2e-feature-apt-cache.yml` | Ubuntu 22.04 CANN 9.0 |
 | [`TC-FEAT-RUSTUP`](#tc-feat-rustup) | Rust / rustup 工具链缓存 | [Rust Cache (Port 8082)](https://ascend-gha-runners.github.io/docs/feature/#rust-rustup-cache-port-8082) | 8082 (HTTP) | `rustup`, `curl` | `e2e-feature-rustup-cache.yml` | openEuler CANN 8.2 |
 | [`TC-FEAT-YUM`](#tc-feat-yum) | openEuler YUM / DNF 缓存 | [YUM Cache (Port 8083)](https://ascend-gha-runners.github.io/docs/feature/#yum-dnf-cache-port-8083) | 8083 (HTTP) | `dnf`, `yum` | `e2e-feature-yum-cache.yml` | openEuler CANN 8.2 |
@@ -114,6 +115,44 @@ uv pip install --no-cache "torch>=2.4.0,<2.4.99"
 - **软断言**：请求 `/pypi/simple/six/` 响应包含 `X-Pypi-Cache` 且在二次请求呈现 HIT；
 - **404 与回源证据**：虚构包硬断言 HTTP 404；仅观察到 `X-Cache-Tier: pypi-org` 时报告终层回源通过，否则标记层级 `not_verified`，不以正文中的 404 字符证明回退；
 - **客户端容灾硬断言**：主索引源为 loopback 故障地址，在空目标目录、忽略预装包、无本地缓存且清空其他备用源的条件下，经备用内网缓存下载 idna==3.10 并导入成功。此项不是 nginx 上游 5xx/507 回退验证。
+
+---
+
+### TC-FEAT-PYPI-MIRROR
+
+#### 1. 目的与范围
+
+在 `mind-third-ci` 的 CPU GitHub Actions Runner 内，绕过 HTTP 代理和本地包缓存，比较公共 PyPI 镜像下载的稳定性与吞吐。该测试用于镜像源选型和网络故障排查，**不代替 `TC-FEAT-PYPI` 缓存功能 E2E**。
+
+- 商业：Huawei、Tencent、Aliyun、Volcengine。
+- 教育机构：TUNA、USTC、SJTU、NJU、BFSU。
+- 基线：Official PyPI。
+- 固定包：small=`asttokens==3.0.2`，medium=`numpy==2.3.4` 的 cp312/aarch64 wheel，large=`pyarrow==21.0.0` 的 cp312/aarch64 wheel。
+- 索引 URL 通过每个镜像的 `/simple/<package>/` 查询；文件从该镜像索引提供的 URL 获取；下载后与索引声明的 SHA256 比对。
+
+**测量边界：** 是 Runner 直连出口网络（`runner-direct-egress`），不是 `squid-cache-0/1` 容器直接回源的网络视角。不得将此结果直接宣称为 Squid 回源性能。
+
+#### 2. 执行策略
+
+- 定时（每天 UTC 18:40）：仅 small wheel，1 路、每镜像 3 次，低流量采样。
+- 手动 `availability`：与定时配置相同。
+- 手动 `bandwidth`：三种 wheel、并发 1/4/8、每组 8 次，总下载量可能超过 10 GiB；不自动运行，不使用 NPU。
+- Workflow：`.github/workflows/e2e-feature-pypi-mirror.yml`；引擎：`scripts/pypi_mirror_benchmark.py`；结果：`pypi-mirror-benchmark` artifact（`samples.csv`、`summary.json`）。
+
+手动触发：
+
+```bash
+gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=availability
+gh workflow run e2e-feature-pypi-mirror.yml --repo ascend-gha-runners/test -f profile=bandwidth
+```
+
+#### 3. 判定与输出
+
+- **硬断言**：Runner 本地的 Python、curl 等依赖正常、引擎成功生成结果文件；测试自身异常判失败。
+- **软断言**：单镜像成功率、P90（所有请求，包含失败耗时）、成功下载中位速率、并发有效吞吐、SHA256 完整性，保持原始记录；公网镜像失败不直接判平台功能失败。
+- **探针**：索引不可达、文件未同步、缺少 `#sha256` 或各镜像哈希不一致，标记 `not_verified`/原因，不能当作下载成功。
+- **数据契约**：每条记录包含镜像、目标 IP、HTTP 状态、curl 退出码、字节数、连接耗时、首字节耗时、总耗时、有效 URL 和 SHA256 结果；工作流摘要提供各组聚合统计。
+- **展示边界**：现有 Pages 自动展示本工作流的 Job 状态和历史通过率；详细带宽指标暂通过 artifact 与 Step Summary 查看，尚未作为首页历史指标展示。
 
 ---
 
