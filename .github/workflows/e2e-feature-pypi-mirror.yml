@@ -3,6 +3,13 @@ name: e2e-feature-pypi-mirror
 # Runs from the selected Runner's direct egress (not a Squid Pod).
 # CPU runners are preferred; NPU runner fallback only when no CPU runner exists.
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-feature-pypi-mirror.yml"
+      - ".github/config/runners.json"
+      - "scripts/select_pypi_runner_matrix.py"
+      - "scripts/test_pypi_runner_matrix.py"
+      - "scripts/pypi_mirror_benchmark.py"
   schedule:
     # Daily lightweight sample across every configured cluster, UTC 18:40.
     - cron: "40 18 * * *"
@@ -52,6 +59,10 @@ jobs:
       matrix: ${{ steps.select.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify benchmark script syntax
+        run: |
+          python3 -m py_compile scripts/pypi_mirror_benchmark.py scripts/select_pypi_runner_matrix.py
+
       - name: Check all-cluster matrix selection
         run: python3 -m unittest discover -s scripts -p 'test_pypi_runner_matrix.py' -v
 
@@ -67,6 +78,7 @@ jobs:
           cat /tmp/pypi-matrix.json
 
   benchmark:
+    if: github.event_name != 'pull_request'
     name: "PyPI mirrors (${{ matrix.cluster }}) / ${{ matrix.type }} runner egress"
     needs: matrix-setup
     runs-on: ${{ matrix.labels }}
