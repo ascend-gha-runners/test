@@ -1,0 +1,139 @@
+name: e2e-feature-pypi-mirror
+
+# Runs from the selected Runner's direct egress (not a Squid Pod).
+# CPU runners are preferred; NPU runner fallback only when no CPU runner exists.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/e2e-feature-pypi-mirror.yml"
+      - ".github/config/runners.json"
+      - "scripts/select_pypi_runner_matrix.py"
+      - "scripts/test_pypi_runner_matrix.py"
+      - "scripts/pypi_mirror_benchmark.py"
+  schedule:
+    # Daily lightweight sample across every configured cluster, UTC 18:40.
+    - cron: "40 18 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "availability: small wheel; bandwidth: small/medium/large wheels with 1/4/8 concurrency"
+        type: choice
+        required: true
+        default: availability
+        options:
+          - availability
+          - bandwidth
+      cluster:
+        description: "Select one cluster for debugging, or all configured clusters"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - gy-001
+          - wlcb-001
+          - sz-lab
+          - gy-003
+          - gy-004
+          - gy-005
+          - gy-006
+          - cn12-001
+          - sh-001
+          - sh-002
+          - hk-001
+          - aiframework
+          - mind-third-ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-mirror-benchmark
+  cancel-in-progress: false
+
+jobs:
+  matrix-setup:
+    name: Build configured cluster matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify benchmark script syntax
+        run: |
+          python3 -m py_compile scripts/pypi_mirror_benchmark.py scripts/select_pypi_runner_matrix.py
+
+      - name: Check all-cluster matrix selection
+        run: python3 -m unittest discover -s scripts -p 'test_pypi_runner_matrix.py' -v
+
+      - name: Select CPU runner per cluster, otherwise NPU
+        id: select
+        shell: bash
+        env:
+          TARGET_CLUSTER: ${{ inputs.cluster || 'all' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/select_pypi_runner_matrix.py --cluster "$TARGET_CLUSTER" > /tmp/pypi-matrix.json
+          echo "matrix=$(cat /tmp/pypi-matrix.json)" >> "$GITHUB_OUTPUT"
+          cat /tmp/pypi-matrix.json
+
+  benchmark:
+    if: github.event_name != 'pull_request'
+    name: "PyPI mirrors (${{ matrix.cluster }}) / ${{ matrix.type }} runner egress"
+    needs: matrix-setup
+    runs-on: ${{ matrix.labels }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.matrix-setup.outputs.matrix) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11
+    env:
+      BENCH_CLUSTER: ${{ matrix.cluster }}
+      BENCH_RUNNER_TYPE: ${{ matrix.type }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify benchmark prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          command -v curl
+          python3 --version
+          curl --version | head -n 1
+          echo "Cluster=$BENCH_CLUSTER; runner type=$BENCH_RUNNER_TYPE"
+
+      - name: Probe PyPI mirror reliability and throughput
+        shell: bash
+        env:
+          BENCH_PROFILE: ${{ inputs.profile || 'availability' }}
+        run: |
+          set -euo pipefail
+          if [[ "$BENCH_PROFILE" == "bandwidth" ]]; then
+            sizes=small,medium,large
+            levels=1,4,8
+            requests=8
+            timeout=120
+          else
+            sizes=small
+            levels=1
+            requests=3
+            timeout=15
+          fi
+          python3 scripts/pypi_mirror_benchmark.py \
+            --sizes "$sizes" \
+            --concurrency "$levels" \
+            --requests "$requests" \
+            --timeout "$timeout" \
+            --output-dir benchmark-results
+
+      - name: Upload per-cluster mirror samples and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-mirror-${{ matrix.cluster }}
+          path: benchmark-results/
+          retention-days: 30
+          if-no-files-found: warn

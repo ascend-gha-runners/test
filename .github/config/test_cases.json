@@ -33,6 +33,23 @@
       }
     },
     {
+      "id": "TC-FEAT-PYPI-MIRROR",
+      "name": "PyPI 公共镜像稳定性与下载吞吐（Runner 直连）",
+      "category": "platform-feature",
+      "feature_doc": "https://github.com/ascend-gha-runners/test/blob/main/docs/test-cases.md#tc-feat-pypi-mirror",
+      "service_port": null,
+      "client": ["curl"],
+      "workflow": ".github/workflows/e2e-feature-pypi-mirror.yml",
+      "engine_scenario": "pypi_mirror_benchmark",
+      "default_container": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1.alpha003-910b-openeuler22.03-py3.11",
+      "target_clusters": "all",
+      "assertions": {
+        "hard": ["本地执行环境具备 python3 与 curl，脚本产出 samples.csv 和 summary.json"],
+        "soft": ["采集镜像成功率、P90 下载耗时、SHA256、单连接速率和并发有效吞吐；公网波动不判定平台功能失败"],
+        "probe": ["镜像索引/文件/哈希缺失时记未验证", "测量的是 Runner 直连出口，并非 Squid Pod 回源路径"]
+      }
+    },
+    {
       "id": "TC-FEAT-APT",
       "name": "Ubuntu APT 镜像缓存服务",
       "category": "platform-feature",

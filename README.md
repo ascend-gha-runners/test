@@ -27,6 +27,7 @@
 | 用例 ID | 特性 | 关联工作流 | 代理端口 / 协议 | 覆盖范围 / 关键断言 |
 |---|---|---|---|---|
 | `TC-FEAT-PYPI` | **PyPI Cache** | [`e2e-feature-pypi-cache.yml`](.github/workflows/e2e-feature-pypi-cache.yml) | Port 80 (HTTP) | 基础连通+用户全流程：pip/uv 多源配置、triton-ascend 安装、`/whl/cpu` PyTorch 安装 (amd64)、运行时 import 验证、404 回源 |
+| `TC-FEAT-PYPI-MIRROR` | **PyPI 公共镜像质量基准** | [`e2e-feature-pypi-mirror.yml`](.github/workflows/e2e-feature-pypi-mirror.yml) | Runner 直连 HTTPS | 全部 13 集群（CPU 优先、NPU 兜底）：华为/腾讯/阿里/火山引擎、TUNA/USTC/上交/南大/北外及 PyPI 官方；每集群小 wheel 每日采样，大文件测速仅手动，按集群保留 artifact |
 | `TC-FEAT-APT` | **APT Cache** | [`e2e-feature-apt-cache.yml`](.github/workflows/e2e-feature-apt-cache.yml) | Port 8081 (HTTP) | 基础连通+用户全流程：Ubuntu 真实 `apt-get update` & 安装构建依赖 `git`/`zstd`/`gcc`/`cmake` |
 | `TC-FEAT-RUSTUP` | **Rust / rustup** | [`e2e-feature-rustup-cache.yml`](.github/workflows/e2e-feature-rustup-cache.yml) | Port 8082 (HTTP) | 基础连通+用户全流程：rustup 极简稳定工具链真实下载安装与 `rustc`/`cargo` 可执行验证 |
 | `TC-FEAT-YUM` | **YUM / DNF Cache** | [`e2e-feature-yum-cache.yml`](.github/workflows/e2e-feature-yum-cache.yml) | Port 8083 (HTTP) | 基础连通+用户全流程：openEuler 真实 `dnf/yum makecache` & 安装构建依赖 `git`/`zstd` |
@@ -50,6 +51,9 @@
 ```bash
 # 平台各特性独立验证
 gh workflow run e2e-feature-pypi-cache.yml   --repo ascend-gha-runners/test
+gh workflow run e2e-feature-pypi-mirror.yml -f profile=availability -f cluster=all --repo ascend-gha-runners/test
+# 大文件测速推荐先选单个集群，避免一次性产生百 GiB 级下载流量
+gh workflow run e2e-feature-pypi-mirror.yml -f profile=bandwidth -f cluster=mind-third-ci --repo ascend-gha-runners/test
 gh workflow run e2e-feature-apt-cache.yml    --repo ascend-gha-runners/test
 gh workflow run e2e-feature-rustup-cache.yml --repo ascend-gha-runners/test
 gh workflow run e2e-feature-yum-cache.yml    --repo ascend-gha-runners/test

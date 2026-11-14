@@ -11,6 +11,7 @@ on:
       - "e2e-feature-git-cdn-checkout"
       - "e2e-feature-go-cache"
       - "e2e-feature-pypi-cache"
+      - "e2e-feature-pypi-mirror"
       - "e2e-feature-rustup-cache"
       - "e2e-feature-yum-cache"
       - "e2e-gy006-a2-runner-smoke"
