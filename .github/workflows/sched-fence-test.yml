@@ -1,0 +1,48 @@
+name: sched-fence-test
+
+# 调度围栏测试（test3-union）：
+#   - card: 2/6/8（310p 档位；小卡占满用 2 卡档 ×N 并发，8 卡验证围栏）
+#   - minutes: 占位时长
+on:
+  workflow_dispatch:
+    inputs:
+      card:
+        description: 'NPU cards per job (2|6|8)'
+        required: true
+        default: '2'
+        type: choice
+        options: ['2', '6', '8']
+      minutes:
+        description: 'occupy minutes'
+        required: true
+        default: '10'
+        type: string
+
+jobs:
+  occupy-2:
+    if: inputs.card == '2'
+    runs-on: linux-aarch64-310p-2-lab
+    timeout-minutes: 120
+    steps:
+      - name: occupy
+        run: |
+          echo "card=2 node=${NODE_NAME}"
+          sleep $(( ${{ inputs.minutes }} * 60 ))
+  occupy-6:
+    if: inputs.card == '6'
+    runs-on: linux-aarch64-310p-6-lab
+    timeout-minutes: 120
+    steps:
+      - name: occupy
+        run: |
+          echo "card=6 node=${NODE_NAME}"
+          sleep $(( ${{ inputs.minutes }} * 60 ))
+  occupy-8:
+    if: inputs.card == '8'
+    runs-on: linux-aarch64-310p-8-lab
+    timeout-minutes: 120
+    steps:
+      - name: occupy
+        run: |
+          echo "card=8 node=${NODE_NAME}"
+          sleep $(( ${{ inputs.minutes }} * 60 ))
